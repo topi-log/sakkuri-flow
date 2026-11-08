@@ -1,131 +1,108 @@
 # さっくりふろー
 
-## 技術構成
+部署・システムごとの行を使って、左から右へ業務フローを描くツールです。
+図形や接続線の編集はブラウザ内で行います。
 
-- フロントエンド：HTML / CSS / JavaScript（フレームワークなし）
-- 図の描画：SVG。図形・接続線・部署レーンをブラウザ内で描画
-- 状態管理：JavaScriptのメモリ上。DB、サーバー保存、自動保存はなし
-- 保存と復元：JSONエクスポート／インポート
-- 閲覧用出力：SVG / PNG / JPG / HTML
-- 配信：Cloudflare Workers Static Assets（サーバー処理なし）
-- 開発用：Node.js 24 LTS / npm / Wrangler 4.158.0（lockfileで固定）
+## できること
 
-MVPの機能と画面を維持して配信用の構成を追加しています。ReactやTypeScriptへの移行は含みません。
-Wranglerは配信・ローカル開発用です。閲覧者のブラウザでNode.jsは動きません。
+- 部署・システムの行と、その中の配置行を追加・並べ替え
+- アクション・分岐の追加、図形上での名前入力
+- 接続線の追加・つなぎ直し、線や矢印・色・ラベルの設定
+- 図形・部署欄の色設定と共通カラーパレット
+- JSONの保存・読み込み
+- SVG・PNG・JPG・HTMLへの書き出し（閲覧用）
 
-## ファイル
+**編集中の内容は自動保存されません。** 再読み込みやタブを閉じる前にJSONで保存してください。
+未保存の変更があるときにページを離れようとすると、ブラウザ標準の確認が表示されます（表示の可否はブラウザの仕様によります）。
+画像やHTMLからの再編集用インポートには対応していません。
 
-```text
-public/            編集対象のHTML・CSS・JavaScript
-  index.html
-  style.css
-  app.js           データ・描画・プロパティ・接続・入出力
-  usability.js     図形上の編集・配置行・全体設定など
-scripts/           構文／参照確認と静的ファイルのビルド
-wrangler.jsonc     Cloudflare配信設定
-package-lock.json  開発依存関係の固定
- dist/             npm run build が生成する配信用ファイル
-```
+## ローカル開発
 
-`app.js`の後に`usability.js`を読み込む構成です。ファイル単位の分割は既存のままです。
-`dist/`を直接編集せず、`public/`を編集してください。
-既存Sitesの認証情報、Git履歴、ホスティング設定はこの配布物に含みません。
-
-## ローカル起動
-
-このフォルダで次を実行します。
+アプリ本体はブラウザ内で動作します。Node.js 24とnpmが必要なのは、以下の開発サーバーや、チェック・テスト・ビルドのコマンドを使う場合です。バージョン指定は`.nvmrc`にあります。
 
 ```sh
 npm ci
 npm run dev
 ```
 
-ターミナルに表示されたlocalhostのURLをブラウザで開きます。Ctrl+Cで終了します。
-`npm run dev`は起動時にビルドします。編集後はコマンドを再起動してください。
+表示されたlocalhostのURLをブラウザで開きます。終了はCtrl+Cです。
+起動時にビルドする構成のため、ソースを編集したらコマンドを再起動してください。
 
-## チェックと配信準備
+| コマンド        | 内容                                                |
+| --------------- | --------------------------------------------------- |
+| `npm run check` | TypeScriptの型・静的ファイル参照の確認              |
+| `npm test`      | モデル・接続線・入力検証等の回帰テスト              |
+| `npm run build` | 型チェック・テスト後、配信用ファイルを`dist/`に生成 |
 
-```sh
-npm run check
-npm test
-npm run build
-npm run deploy:check
+## 技術構成とファイル
+
+HTML / CSS / TypeScriptとSVGで構成した静的サイトです。ブラウザは変換後のJavaScriptを実行します。アプリ用サーバー・DB・ログイン機能はありません。
+
+```text
+src/
+  types.d.ts        フロー・部署・図形・接続線などの型
+  app.ts            モデル・入力検証・描画・プロパティ・入出力
+  usability.ts      図形上の編集・配置行・全体設定
+public/
+  index.html        ページ構造
+  style.css         スタイル
+  favicon.svg       ファビコン
+  _headers          セキュリティヘッダーの設定
+scripts/            チェックとビルド
+tsconfig.json       TypeScriptの変換・型チェック設定
+.build/             TypeScriptの変換結果（Git管理外）
+tests/             回帰テストとテスト用ヘルパー
+package-lock.json   開発依存関係の固定
+dist/              ビルド生成物（Git管理外）
 ```
 
-`deploy:check`はWranglerのdry runです。公開はしません。
-構文・静的ファイル参照・接続線や上限などの回帰テスト・Wranglerの配信構成を確認します。全操作の自動テストではありません。
+コードは`src/`、HTML・CSSなどは`public/`を編集します。
+`src/`は`strict`で型チェックし、変換したJSと静的ファイルを`dist/`にまとめます。
+`.build/`、`dist/`、`node_modules/`はコミットしません。サンプルの業務フローJSONもこのリポジトリでは管理しません。
 
-## Cloudflareへデプロイ
+## JSON形式と制限
 
-Cloudflareアカウントを用意して、次の手順を実施します。
+再編集用JSONの形式は`version: 1`です。従来のJSONは、新しい制限を満たしていれば読み込めます。
+検証で扱わない追加フィールドは読み込み時に除去します。
 
-1. `wrangler.jsonc`の`name`を、配信先Workerの識別名に変更します。
-   現在のWorker識別名は`sakkuri-flow`です。サービスの表示名や独自ドメインとは別の設定です。
-   既存Workerと同名にすると更新になるため、初回は未使用の名前を使ってください。
-2. Cloudflareへログインします。
-3. 対象アカウントを確認してから公開します。
+| 項目                             | 上限・範囲                                |
+| -------------------------------- | ----------------------------------------- |
+| JSONファイル                     | 5,000,000バイト                           |
+| 部署・システム                   | 100件                                     |
+| 図形                             | 2,000件                                   |
+| 接続線                           | 4,000件                                   |
+| 部署内の配置行                   | 各1〜20行                                 |
+| タイトル・部署名・配置行名・種別 | 各100文字                                 |
+| 図形名                           | 1,000文字                                 |
+| 矢印ラベル                       | 200文字                                   |
+| 表示用文字列の合計               | 100,000文字（IDなどの内部情報は含めない） |
+| 登録種別・追加カラー             | 50件・256色                               |
+| ID                               | 1〜128文字、英数字・`_`・`-`              |
+| 図形の横位置                     | 220〜100,000                              |
+| 手動経路点                       | 接続線ごと200点、全体20,000点             |
+| 経路座標                         | 横0〜101,000、縦0〜300,000                |
+| 線の太さ                         | 1〜12px                                   |
 
-```sh
-npx wrangler login
-npx wrangler whoami
-npm run deploy
-```
+文字数はJavaScriptの文字列長（UTF-16コード単位）で数えます。
+追加・編集時にも制限を確認します。図形と線を同時に追加する操作では両方の件数を先に確認します。
+文字数上限付近では、部署の初期名・種別用の余裕を確保して追加を拒否する場合があります。
+手動調整した接続線は、接続点の位置が変わると自動経路へ戻します。
 
-複数アカウントがある場合は、対象の`account_id`を`wrangler.jsonc`へ設定してから実行します。
-公開が成功すると配信URLが表示されます。独自ドメインはWorkerのDomains & Routesで別途設定できます。
-アカウント情報・APIトークンはソースや公開ファイルに記載しません。
+## 入力検証とセキュリティ
 
-## mainへのpushで自動デプロイ
+- JSONは`JSON.parse`で読み込み、コードとして評価しません。
+- 名前・ラベルをHTML/SVGへ埋め込む箇所はエスケープします。
+- フィールドの型・文字数・件数・座標、色形式・線の種類・接続先・IDの重複などを検証します。
+- 色は`#RRGGBB`、線形状・接続点は許可した選択肢のみ、矢印フラグはbooleanのみ受け入れます。
+- 検証した既知のフィールドだけから新しいモデルを作成します。取り込んだオブジェクトを直接使いません。
+- 検証失敗時は現在のフローを維持します。読込後の描画で例外が起きた場合も、元のフローへ戻します。
+- `_headers`でCSP、MIME sniffing防止、Referrer-Policyを設定します。CSPはスクリプトの自サイト制限・外部への接続禁止・埋め込み制限などを行います。
 
-Cloudflare Workers BuildsのGit連携を使用します。GitHub ActionsのワークフローやGitHub Secretsの登録は不要です。
+`style`属性を使用するためCSPのstyle-srcは`unsafe-inline`を許可しています。script-srcには許可していません。
+単純なローカルHTTPサーバーでは、`_headers`の設定は適用されません。
+テストは入力検証・復元・描画等の回帰確認であり、あらゆる攻撃やブラウザの安全性を保証するものではありません。
 
-CloudflareダッシュボードのWorkers & PagesからGitリポジトリを接続してWorkerを作成します。既存WorkerならSettings → Buildsでリポジトリを接続します。
-GitHub連携時に`topi-log/sakkuri-flow`へのアクセスを許可し、次の値を設定してください。
+## データと通信
 
-| 設定 | 値 |
-| --- | --- |
-| リポジトリ | `topi-log/sakkuri-flow` |
-| Worker名 | `sakkuri-flow`（wrangler.jsoncのnameと一致） |
-| 本番ブランチ | `main` |
-| ルートディレクトリ | リポジトリ直下（サブディレクトリ指定なし） |
-| ビルドコマンド | `npm run build` |
-| デプロイコマンド | `npx wrangler deploy` |
-| ビルド環境変数 | `NODE_VERSION=24` |
-
-依存関係はpackage-lock.jsonを含めて管理しています。ビルドコマンド内で構文・静的ファイル参照をチェックします。
-mainだけを公開する運用では、非本番ブランチのプレビュービルドは無効にしてください。
-接続後、初回のビルド・公開が成功したことをCloudflareのBuilds画面で確認します。以降はmainへのpushで自動ビルド・デプロイされます。
-
-このリポジトリへの設定ファイル追加だけではGit連携は有効になりません。Cloudflare側で一度、上記の接続設定が必要です。
-
-公式資料：
-- https://developers.cloudflare.com/workers/ci-cd/builds/git-integration/
-- https://developers.cloudflare.com/workers/ci-cd/builds/configuration/
-- https://developers.cloudflare.com/workers/ci-cd/builds/build-branches/
-
-## MVPの保存・通信の範囲
-
-図の内容をアップロードするAPIは実装していません。ブラウザの再読み込みで編集中の状態は失われるため、JSONで保存してください。
-既存と同じくCSSがGoogle Fontsを読み込みます。図データの送信ではありませんが、フォント取得の外部通信は発生します。
-Cloudflareへのアクセスに伴う配信側のログ等と、図データの保存機能は別です。
-
-## 公開後に確認する操作
-
-- 初期状態が3部署・図形なしで開く
-- 図形の追加・名前入力・移動、接続・接続先変更
-- 部署の並べ替え、部署内行数と行名の変更
-- JSONのエクスポートと再インポートで内容が復元される
-- PNG・JPG・SVG・HTMLの出力を開ける
-- 横スクロール時の部署欄固定、拡大縮小
-
-## 公式資料
-
-- https://developers.cloudflare.com/workers/static-assets/
-- https://developers.cloudflare.com/workers/static-assets/get-started/
-- https://developers.cloudflare.com/workers/static-assets/binding/
-
-## データ上限
-
-部署・システムは100件、図形は2,000件、接続線は4,000件までです。追加操作では上限を超える追加を拒否し、図形と線を同時に作る場合は両方追加できる場合だけ作成します。
-JSONファイルの入出力は5MBまでです。サイズ超過時はメッセージを表示して保存を中止します。
-手動調整した接続線は接続点の位置が変わった場合に自動経路へ戻し、直角を維持します。
+図データをアップロードするAPI、ブラウザストレージへの保存、アクセス解析は実装していません。
+Google Fontsの取得による外部通信は発生します。フォント取得に図データは渡していません。

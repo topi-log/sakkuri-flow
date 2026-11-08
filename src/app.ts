@@ -1,5 +1,35 @@
-const $ = (s) => document.querySelector(s),
-  NS = "http://www.w3.org/2000/svg",
+type FixedElements = {
+  "#diagram": SVGSVGElement;
+  "#lanes-svg": SVGSVGElement;
+  "#title": HTMLInputElement;
+  "#file": HTMLInputElement;
+  "#properties input": HTMLInputElement;
+  "#confirm-dialog": HTMLDialogElement;
+  "#setup-dialog": HTMLDialogElement;
+};
+type OptionalElements = {
+  "#prop-text": HTMLTextAreaElement;
+  "#prop-name": HTMLInputElement;
+  "#tip-popover": HTMLElement;
+  "#line-popover": HTMLElement;
+  "#line-type": HTMLButtonElement;
+  "#exportmenu": HTMLElement;
+  "#snap-target": SVGElement;
+  "#pending-edge": SVGElement;
+  "#pending-defs": SVGElement;
+  "#lane-overlay": SVGGElement;
+  "#lane-drop": SVGElement;
+  "#reconnect-preview": SVGElement;
+};
+function $<K extends keyof FixedElements>(selector: K): FixedElements[K];
+function $<K extends keyof OptionalElements>(
+  selector: K,
+): OptionalElements[K] | null;
+function $(selector: string): HTMLElement;
+function $(selector: string): Element | null {
+  return document.querySelector(selector);
+}
+const NS = "http://www.w3.org/2000/svg",
   uid = () => crypto.randomUUID();
 // Keep creation and JSON import/export limits in one place.
 const LIMITS = Object.freeze({
@@ -7,9 +37,18 @@ const LIMITS = Object.freeze({
   nodes: 2000,
   edges: 4000,
   jsonBytes: 5000000,
+  totalChars: 100000,
+  routePoints: 20000,
+  titleChars: 100,
+  nameChars: 100,
+  textChars: 1000,
+  labelChars: 200,
 });
-function canAdd(additions) {
-  for (const [kind, count] of Object.entries(additions)) {
+function canAdd(additions: Partial<Record<ItemKind, number>>) {
+  for (const [kind, count] of Object.entries(additions) as [
+    ItemKind,
+    number,
+  ][]) {
     if (data[kind].length + count > LIMITS[kind]) {
       toast(
         { lanes: "部署・システムは", nodes: "図形は", edges: "接続線は" }[
@@ -21,9 +60,16 @@ function canAdd(additions) {
       return false;
     }
   }
+  if (
+    projectTextLength(data) + (additions.lanes || 0) * 105 >
+    LIMITS.totalChars
+  ) {
+    toast("文字数の上限を超えるため追加できません");
+    return false;
+  }
   return true;
 }
-const initial = {
+const initial: Project = {
   version: 1,
   title: "untitled",
   lanes: [
@@ -35,139 +81,342 @@ const initial = {
   edges: [],
   customColors: [],
 };
-let data = structuredClone(initial),
-  selected = null,
-  mode = "edit",
-  source = null,
+let data: Project = structuredClone(initial),
+  selected: EditorSelection | null = null,
+  mode: EditorMode = "edit",
   zoom = 1,
-  past = [],
-  future = [],
+  past: string[] = [],
+  future: string[] = [],
   laneWidth = 164,
-  pending = null,
-  reconnect = null;
-function valid(d) {
-  if (
-    !d ||
-    d.version !== 1 ||
-    typeof d.title !== "string" ||
-    !Array.isArray(d.lanes) ||
-    d.lanes.length > LIMITS.lanes ||
-    !Array.isArray(d.nodes) ||
-    d.nodes.length > LIMITS.nodes ||
-    !Array.isArray(d.edges) ||
-    d.edges.length > LIMITS.edges
-  )
-    return false;
-  if (
-    d.customColors !== undefined &&
-    (!Array.isArray(d.customColors) ||
-      d.customColors.length > 256 ||
-      d.customColors.some(
-        (c) => typeof c !== "string" || !/^#[0-9a-f]{6}$/i.test(c),
-      ))
-  )
-    return false;
-  if (
-    d.types !== undefined &&
-    (!Array.isArray(d.types) ||
-      d.types.length > 50 ||
-      d.types.some((t) => typeof t !== "string" || t.length > 100))
-  )
-    return false;
-  const ids = new Set();
-  for (const l of d.lanes) {
-    if (
-      typeof l.id !== "string" ||
-      ids.has(l.id) ||
-      typeof l.name !== "string" ||
-      typeof l.type !== "string"
-    )
-      return false;
-    if (l.customType !== undefined && typeof l.customType !== "boolean")
-      return false;
-    if (
-      l.rows !== undefined &&
-      (!Number.isInteger(l.rows) || l.rows < 1 || l.rows > 20)
-    )
-      return false;
-    if (
-      l.rowNames !== undefined &&
-      (!Array.isArray(l.rowNames) ||
-        l.rowNames.length > 20 ||
-        l.rowNames.some((x) => typeof x !== "string"))
-    )
-      return false;
-    ids.add(l.id);
+  pending: ConnectionStart | null = null,
+  reconnect: { edgeId: string; end: "from" | "to" } | null = null;
+// Never render raw imported objects. Validate and copy only known fields.
+function normalizeProject(input: unknown): Project {
+  function fail(message: string): never {
+    throw new Error(message);
   }
-  const nodes = new Set();
-  for (const n of d.nodes) {
+  const record = (value: unknown): value is Record<string, unknown> =>
+    value !== null && typeof value === "object" && !Array.isArray(value);
+  const text = (value: unknown, max: number, label: string): string => {
+    if (typeof value !== "string" || value.length > max)
+      fail(label + "の文字数または型が不正です");
+    return value;
+  };
+  const number = (
+    value: unknown,
+    min: number,
+    max: number,
+    label: string,
+  ): number => {
     if (
-      typeof n.id !== "string" ||
-      nodes.has(n.id) ||
-      !ids.has(n.lane) ||
-      !Number.isFinite(n.x) ||
-      n.x < 220 ||
-      n.x > 100000 ||
-      typeof n.text !== "string" ||
-      !["action", "decision"].includes(n.type)
+      typeof value !== "number" ||
+      !Number.isFinite(value) ||
+      value < min ||
+      value > max
     )
-      return false;
-    if (
-      n.row !== undefined &&
-      (!Number.isInteger(n.row) ||
-        n.row < 0 ||
-        n.row >= laneRows(d.lanes.find((l) => l.id === n.lane)))
-    )
-      return false;
-    nodes.add(n.id);
+      fail(label + "の範囲または型が不正です");
+    return value;
+  };
+  const array = (value: unknown, max: number, label: string): unknown[] => {
+    if (!Array.isArray(value) || value.length > max)
+      fail(label + "の件数または型が不正です");
+    return value;
+  };
+  const id = (raw: unknown) => {
+    const value = text(raw, 128, "ID");
+    if (!/^[A-Za-z0-9_-]+$/.test(value)) fail("IDの形式が不正です");
+    return value;
+  };
+  const optional = <T, K extends keyof T & string>(
+    src: Record<string, unknown>,
+    dst: T,
+    key: K,
+    check: (value: unknown) => T[K],
+  ) => {
+    if (Object.hasOwn(src, key)) dst[key] = check(src[key]);
+  };
+  const colour = (value: unknown): string => {
+    if (typeof value !== "string" || !/^#[0-9a-f]{6}$/i.test(value))
+      fail("色は#RRGGBB形式で指定してください");
+    return value;
+  };
+  const boolean = (value: unknown): boolean => {
+    if (typeof value !== "boolean")
+      fail("矢印等のフラグはbooleanで指定してください");
+    return value;
+  };
+  const choice =
+    <T extends string>(values: readonly T[]) =>
+    (value: unknown): T => {
+      const match = values.find((candidate) => candidate === value);
+      if (match === undefined) fail("線や接続点の指定が不正です");
+      return match;
+    };
+  if (!record(input) || input.version !== 1)
+    fail("対応するフローJSONではありません");
+  const result: Project = {
+    version: 1,
+    title: text(input.title, LIMITS.titleChars, "タイトル"),
+    lanes: [],
+    nodes: [],
+    edges: [],
+  };
+  optional(input, result, "laneWidth", (v) =>
+    number(v, 110, 400, "部署欄の幅"),
+  );
+  optional(input, result, "types", (v) =>
+    array(v, 50, "種別").map((t) => text(t, 100, "種別")),
+  );
+  optional(input, result, "customColors", (v) =>
+    array(v, 256, "追加カラー").map(colour),
+  );
+  const laneIds = new Set(),
+    nodeIds = new Set(),
+    edgeIds = new Set();
+  for (const l of array(input.lanes, LIMITS.lanes, "部署")) {
+    if (!record(l)) fail("部署の形式が不正です");
+    const lane: Lane = {
+      id: id(l.id),
+      name: text(l.name, 100, "部署名"),
+      type: text(l.type, 100, "種別"),
+    };
+    if (laneIds.has(lane.id)) fail("部署IDが重複しています");
+    laneIds.add(lane.id);
+    optional(l, lane, "customType", boolean);
+    optional(l, lane, "rows", (v) => {
+      const count = number(v, 1, 20, "配置行数");
+      if (!Number.isInteger(count)) fail("配置行数は整数で指定してください");
+      return count;
+    });
+    optional(l, lane, "rowNames", (v) =>
+      array(v, 20, "行名").map((n) => text(n, 100, "行名")),
+    );
+    optional(l, lane, "fill", colour);
+    result.lanes.push(lane);
   }
-  const edges = new Set();
-  for (const e of d.edges) {
+  const laneMap = new Map(result.lanes.map((l) => [l.id, l]));
+  for (const n of array(input.nodes, LIMITS.nodes, "図形")) {
+    if (!record(n)) fail("図形の形式が不正です");
+    const node: FlowNode = {
+      id: id(n.id),
+      lane: id(n.lane),
+      x: number(n.x, 220, 100000, "図形の位置"),
+      type: choice(["action", "decision"] as const)(n.type),
+      text: text(n.text, LIMITS.textChars, "図形名"),
+    };
+    if (nodeIds.has(node.id) || !laneIds.has(node.lane))
+      fail("図形IDまたは所属部署が不正です");
+    nodeIds.add(node.id);
+    optional(n, node, "row", (v) => {
+      const row = number(v, 0, laneRows(laneMap.get(node.lane)) - 1, "配置行");
+      if (!Number.isInteger(row)) fail("配置行は整数で指定してください");
+      return row;
+    });
+    for (const key of ["fill", "stroke"] as const)
+      optional(n, node, key, colour);
+    result.nodes.push(node);
+  }
+  let routePoints = 0;
+  for (const e of array(input.edges, LIMITS.edges, "接続線")) {
+    if (!record(e)) fail("接続線の形式が不正です");
+    const edge: FlowEdge = {
+      id: id(e.id),
+      from: id(e.from),
+      to: id(e.to),
+      label: text(e.label, LIMITS.labelChars, "矢印ラベル"),
+    };
     if (
-      typeof e.id !== "string" ||
-      edges.has(e.id) ||
-      !nodes.has(e.from) ||
-      !nodes.has(e.to) ||
-      e.from === e.to ||
-      typeof e.label !== "string"
+      edgeIds.has(edge.id) ||
+      !nodeIds.has(edge.from) ||
+      !nodeIds.has(edge.to) ||
+      edge.from === edge.to
     )
-      return false;
-    if (
-      e.route !== undefined &&
-      (!Array.isArray(e.route) ||
-        e.route.length > 200 ||
-        e.route.some((p) => !Number.isFinite(p.x) || !Number.isFinite(p.y)))
-    )
-      return false;
-    edges.add(e.id);
+      fail("接続線IDまたは接続先が不正です");
+    edgeIds.add(edge.id);
+    for (const key of ["fromPort", "toPort"] as const)
+      optional(
+        e,
+        edge,
+        key,
+        choice(["top", "right", "bottom", "left"] as const),
+      );
+    optional(
+      e,
+      edge,
+      "shape",
+      choice(["straight", "orthogonal", "curve"] as const),
+    );
+    optional(e, edge, "dash", choice(["solid", "dashed", "dotted"] as const));
+    for (const key of ["color", "labelFill"] as const)
+      optional(e, edge, key, colour);
+    for (const key of ["startArrow", "endArrow"] as const)
+      optional(e, edge, key, boolean);
+    optional(e, edge, "width", (v) => number(v, 1, 12, "線の太さ"));
+    optional(e, edge, "route", (v) => {
+      const points = array(v, 200, "経路点");
+      routePoints += points.length;
+      if (routePoints > LIMITS.routePoints)
+        fail("経路点は全体で20,000点までです");
+      return points.map((p) => {
+        if (!record(p)) fail("経路点の形式が不正です");
+        return {
+          x: number(p.x, 0, 101000, "経路の横位置"),
+          y: number(p.y, 0, 300000, "経路の縦位置"),
+        };
+      });
+    });
+    result.edges.push(edge);
+  }
+  if (projectTextLength(result) > LIMITS.totalChars)
+    fail("文字数は全体で100,000文字までです");
+  return result;
+}
+function projectTextLength(project: Project) {
+  let count = project.title.length;
+  for (const l of project.lanes)
+    count +=
+      l.name.length +
+      l.type.length +
+      (l.rowNames || []).reduce((n, s) => n + s.length, 0);
+  for (const n of project.nodes) count += n.text.length;
+  for (const e of project.edges) count += e.label.length;
+  return count + (project.types || []).reduce((n, s) => n + s.length, 0);
+}
+function valid(input: unknown) {
+  try {
+    normalizeProject(input);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function setText<K extends string | number>(
+  obj: Record<K, string>,
+  key: K,
+  value: string,
+  input: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | null,
+  max: number = LIMITS.nameChars,
+) {
+  const previous = obj[key];
+  obj[key] = value;
+  if (value.length > max || projectTextLength(data) > LIMITS.totalChars) {
+    obj[key] = previous;
+    if (input) input.value = previous || "";
+    toast("文字数の上限を超えています");
+    return false;
   }
   return true;
 }
-const escape = (s) =>
+function replaceProject(next: unknown) {
+  const candidate = normalizeProject(next);
+  const previous = { data, laneWidth, selected, pending };
+  try {
+    data = candidate;
+    laneWidth = candidate.laneWidth || 164;
+    selected = null;
+    pending = null;
+    render();
+    properties();
+  } catch (error) {
+    ({ data, laneWidth, selected, pending } = previous);
+    render();
+    properties();
+    throw error;
+  }
+}
+
+const escapeHtml = (s: unknown) =>
   String(s).replace(
     /[&<>"']/g,
     (c) =>
-      ({
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        '"': "&quot;",
-        "'": "&apos;",
-      })[c],
+      (
+        ({
+          "&": "&amp;",
+          "<": "&lt;",
+          ">": "&gt;",
+          '"': "&quot;",
+          "'": "&apos;",
+        }) as Record<string, string>
+      )[c],
   );
-function color(v, f) {
-  return /^#[0-9a-f]{6}$/i.test(v) ? v : f;
+function color(v: unknown, f: string) {
+  return typeof v === "string" && /^#[0-9a-f]{6}$/i.test(v) ? v : f;
 }
 function checkpoint() {
   past.push(JSON.stringify(data));
   if (past.length > 60) past.shift();
   future = [];
 }
-function save() {}
-function laneRows(l) {
+// Keep only a comparison snapshot in memory; this is not autosave.
+let savedSnapshot: string | undefined;
+let leaveWarningActive = false;
+const draftFields = new Map<HTMLInputElement, () => string>();
+
+function projectSnapshot() {
+  return JSON.stringify(data, (key, value: unknown) => {
+    // Opening properties can materialize these existing visual defaults.
+    switch (key) {
+      case "stroke":
+      case "color":
+        return value === "#222222" ? undefined : value;
+      case "labelFill":
+        return value === "#ffffff" ? undefined : value;
+      case "startArrow":
+        return value === false ? undefined : value;
+      case "endArrow":
+        return value === true ? undefined : value;
+      case "dash":
+        return value === "solid" ? undefined : value;
+      case "shape":
+        return value === "orthogonal" ? undefined : value;
+      case "width":
+        return value === 1.5 ? undefined : value;
+      default:
+        return value;
+    }
+  });
+}
+
+function hasUnsavedChanges() {
+  let hasDraft = false;
+  for (const [input, committed] of draftFields) {
+    if (!input.isConnected || input.value === committed()) draftFields.delete(input);
+    else hasDraft = true;
+  }
+  return hasDraft || projectSnapshot() !== savedSnapshot;
+}
+
+function confirmLeave(event: BeforeUnloadEvent) {
+  if (!hasUnsavedChanges()) return;
+  event.preventDefault();
+  event.returnValue = true;
+}
+
+function updateLeaveWarning() {
+  savedSnapshot ??= projectSnapshot();
+  const dirty = hasUnsavedChanges();
+  if (dirty === leaveWarningActive) return;
+  leaveWarningActive = dirty;
+  if (dirty) window.addEventListener("beforeunload", confirmLeave);
+  else window.removeEventListener("beforeunload", confirmLeave);
+}
+
+function trackDraft(input: HTMLInputElement, committed: () => string) {
+  input.addEventListener("input", () => {
+    draftFields.set(input, committed);
+    updateLeaveWarning();
+  });
+}
+
+function markProjectSaved() {
+  savedSnapshot = projectSnapshot();
+  draftFields.clear();
+  updateLeaveWarning();
+}
+function laneRows(l?: Lane) {
   return Math.max(1, Math.min(20, Math.floor(Number(l?.rows) || 1)));
 }
-function laneGeometry(l) {
+function laneGeometry(l: Lane) {
   const heights = Array(laneRows(l)).fill(56);
   for (const n of data.nodes) {
     if (n.lane !== l?.id) continue;
@@ -182,7 +431,7 @@ function laneGeometry(l) {
   });
   return { centers, heights, height: cursor };
 }
-function laneTop(index) {
+function laneTop(index: number) {
   return (
     42 +
     data.lanes
@@ -190,7 +439,7 @@ function laneTop(index) {
       .reduce((sum, l) => sum + laneGeometry(l).height, 0)
   );
 }
-function placementAtY(y) {
+function placementAtY(y: number) {
   let index = data.lanes.findIndex((l, i) => y < laneTop(i + 1));
   if (index < 0) index = data.lanes.length - 1;
   index = Math.max(0, index);
@@ -202,7 +451,7 @@ function placementAtY(y) {
     if (Math.abs(local - centers[i]) < Math.abs(local - centers[row])) row = i;
   return { lane: lane?.id, row };
 }
-function insertionAtY(y) {
+function insertionAtY(y: number) {
   let best = 0,
     distance = Infinity;
   for (let i = 0; i <= data.lanes.length; i++) {
@@ -214,7 +463,7 @@ function insertionAtY(y) {
   }
   return best;
 }
-function pos(n) {
+function pos(n: FlowNode) {
   const i = data.lanes.findIndex((l) => l.id === n.lane),
     row = Math.max(
       0,
@@ -225,10 +474,10 @@ function pos(n) {
     y: laneTop(i) + laneGeometry(data.lanes[i]).centers[row],
   };
 }
-function lines(t) {
+function lines(t: string) {
   return String(t).match(/.{1,11}/gu) || [""];
 }
-function port(n, side) {
+function port(n: FlowNode, side: Side): Anchor {
   const p = pos(n),
     hw = n.type === "decision" ? 80 : 76,
     hh = n.type === "decision" ? 49 : 28;
@@ -239,7 +488,11 @@ function port(n, side) {
     side,
   };
 }
-function edgeSides(e, a, b) {
+function edgeSides(
+  e: Pick<FlowEdge, "fromPort" | "toPort">,
+  a: FlowNode,
+  b: FlowNode,
+): [Side, Side] {
   const p = pos(a),
     q = pos(b);
   const horizontal = Math.abs(p.x - q.x) >= Math.abs(p.y - q.y);
@@ -262,20 +515,20 @@ function edgeSides(e, a, b) {
           : "bottom"),
   ];
 }
-function edgePath(p, q, shape, edge) {
+function edgePath(p: Anchor, q: Anchor, shape: LineShape, edge?: FlowEdge) {
   // Absolute bend coordinates are reusable only while both anchors stay put.
-  if (edge?.route?.length >= 2) {
+  if (edge?.route && edge.route.length >= 2) {
     const first = edge.route[0],
-      last = edge.route.at(-1);
+      last = edge.route[edge.route.length - 1];
     if (first.x !== p.x || first.y !== p.y || last.x !== q.x || last.y !== q.y)
       delete edge.route;
   }
-  if (shape === "orthogonal" && edge?.route?.length >= 2) {
+  if (shape === "orthogonal" && edge?.route && edge.route.length >= 2) {
     const points = [p, ...edge.route.slice(1, -1), q];
     return points.map((v, i) => `${i ? "L" : "M"} ${v.x} ${v.y}`).join(" ");
   }
   if (shape === "straight") return `M ${p.x} ${p.y} L ${q.x} ${q.y}`;
-  const vec = (s) =>
+  const vec = (s: Side) =>
       ({ top: [0, -1], right: [1, 0], bottom: [0, 1], left: [-1, 0] })[s] || [
         1, 0,
       ],
@@ -318,9 +571,9 @@ function edgePath(p, q, shape, edge) {
       ...new Set([pa.y, qb.y, ...boxes.flatMap((b) => [b.t - 1, b.b + 1])]),
     ].sort((a, b) => a - b),
     ny = ys.length;
-  const blocked = (x, y) =>
+  const blocked = (x: number, y: number) =>
       boxes.some((b) => x > b.l && x < b.r && y > b.t && y < b.b),
-    clear = (x, y, u, v) =>
+    clear = (x: number, y: number, u: number, v: number) =>
       !boxes.some((b) =>
         x === u
           ? x > b.l && x < b.r && Math.max(y, v) > b.t && Math.min(y, v) < b.b
@@ -329,13 +582,13 @@ function edgePath(p, q, shape, edge) {
   const start = xs.indexOf(pa.x) * ny + ys.indexOf(pa.y),
     goal = xs.indexOf(qb.x) * ny + ys.indexOf(qb.y),
     dist = new Map([[start + ":0", 0]]),
-    prev = new Map(),
+    prev = new Map<string, string>(),
     queue = [{ id: start, dir: 0, cost: 0 }],
-    coords = (id) => ({ x: xs[Math.floor(id / ny)], y: ys[id % ny] });
-  let finish = null;
+    coords = (id: number) => ({ x: xs[Math.floor(id / ny)], y: ys[id % ny] });
+  let finish: string | null = null;
   while (queue.length) {
     queue.sort((a, b) => b.cost - a.cost);
-    const current = queue.pop(),
+    const current = queue.pop()!,
       key = current.id + ":" + current.dir;
     if (current.cost !== dist.get(key)) continue;
     if (current.id === goal) {
@@ -368,9 +621,9 @@ function edgePath(p, q, shape, edge) {
       }
     }
   }
-  let points = [];
+  let points: Point[] = [];
   if (finish) {
-    for (let key = finish; key; key = prev.get(key))
+    for (let key: string | undefined = finish; key; key = prev.get(key))
       points.unshift(coords(Number(key.split(":")[0])));
   } else {
     const y = Math.min(pa.y, qb.y, ...boxes.map((b) => b.t)) - 30;
@@ -402,14 +655,19 @@ function edgePath(p, q, shape, edge) {
       v = b.y + ((c.y - b.y) * r) / d2;
     path += ` L ${x} ${y} Q ${b.x} ${b.y} ${u} ${v}`;
   }
-  const last = points.at(-1);
+  const last = points[points.length - 1];
   return path + ` L ${last.x} ${last.y}`;
 }
-function snapTarget(clientX, clientY, exclude, highlight = false) {
+function snapTarget(
+  clientX: number,
+  clientY: number,
+  exclude: string,
+  highlight = false,
+) {
   const r = $("#diagram").getBoundingClientRect(),
     x = (clientX - r.left) / zoom,
     y = (clientY - r.top) / zoom;
-  let best = null;
+  let best: Snap | null = null;
   for (const n of data.nodes) {
     if (n.id === exclude) continue;
     const p = pos(n),
@@ -419,7 +677,7 @@ function snapTarget(clientX, clientY, exclude, highlight = false) {
       n.type === "decision"
         ? Math.abs(x - p.x) / hw + Math.abs(y - p.y) / hh <= 1.25
         : Math.abs(x - p.x) <= hw + 12 && Math.abs(y - p.y) <= hh + 12;
-    for (const side of ["top", "right", "bottom", "left"]) {
+    for (const side of ["top", "right", "bottom", "left"] as const) {
       const point = port(n, side),
         distance = Math.hypot(x - point.x, y - point.y);
       if (
@@ -441,7 +699,7 @@ function snapTarget(clientX, clientY, exclude, highlight = false) {
   }
   return best;
 }
-function optimizeConnections(nodeId) {
+function optimizeConnections(nodeId: string) {
   const measure = document.createElementNS(NS, "path");
   for (const e of data.edges) {
     if (e.from !== nodeId && e.to !== nodeId) continue;
@@ -451,8 +709,8 @@ function optimizeConnections(nodeId) {
     if (!a || !b) continue;
     const current = edgeSides(e, a, b),
       pairs = [];
-    for (const from of ["top", "right", "bottom", "left"])
-      for (const to of ["top", "right", "bottom", "left"]) {
+    for (const from of ["top", "right", "bottom", "left"] as const)
+      for (const to of ["top", "right", "bottom", "left"] as const) {
         const p = port(a, from),
           q = port(b, to);
         pairs.push({ from, to, p, q, lower: Math.hypot(p.x - q.x, p.y - q.y) });
@@ -480,17 +738,18 @@ function optimizeConnections(nodeId) {
     [e.fromPort, e.toPort] = winner;
   }
 }
-function drawPending(q) {
+function drawPending(q: Anchor) {
   $("#pending-edge")?.remove();
-  if (!pending) return;
-  const n = data.nodes.find((n) => n.id === pending.id);
+  const origin = pending;
+  if (!origin) return;
+  const n = data.nodes.find((n) => n.id === origin.id);
   if (!n) {
     pending = null;
     return;
   }
   const path = document.createElementNS(NS, "path");
   path.id = "pending-edge";
-  path.setAttribute("d", edgePath(port(n, pending.side), q, "orthogonal"));
+  path.setAttribute("d", edgePath(port(n, origin.side), q, "orthogonal"));
   path.setAttribute("fill", "none");
   path.setAttribute("stroke", "#3597cc");
   path.setAttribute("stroke-width", "2");
@@ -507,7 +766,7 @@ function drawPending(q) {
   $("#diagram").append(path);
 }
 function exportSVG() {
-  const clone = $("#diagram").cloneNode(true);
+  const clone = $("#diagram").cloneNode(true) as SVGSVGElement;
   const lanes = $("#lane-overlay")?.cloneNode(true);
   if (lanes) clone.append(lanes);
   clone
@@ -541,12 +800,12 @@ function render() {
     );
   $("#title").value = data.title;
   const svg = $("#diagram");
-  svg.setAttribute("width", w);
-  svg.setAttribute("height", h);
+  svg.setAttribute("width", String(w));
+  svg.setAttribute("height", String(h));
   svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
   // Parse the diagram once; += on innerHTML reparses all previous elements.
   let markup = `<defs><pattern id="dots" width="20" height="20" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r=".65" fill="#dceaf2"/></pattern></defs><rect width="100%" height="100%" fill="#fbfdff"/><rect x="164" y="55" width="${w - 164}" height="${h - 55}" fill="url(#dots)"/><rect width="${w}" height="42" fill="#f1f8fc"/>`;
-  const appendMarkup = (part) => {
+  const appendMarkup = (part: string) => {
     markup += part;
   };
   let laneMarkup = `<rect width="${laneWidth}" height="${h}" fill="#f1f8fc"/>`;
@@ -557,10 +816,7 @@ function render() {
       named = (l.rowNames || []).slice(0, laneRows(l)).some(Boolean),
       split = Math.round(laneWidth * 0.5);
     const bg = color(l.fill, i % 2 ? "#edf7fd" : "#f4faff"),
-      rgb = bg
-        .slice(1)
-        .match(/../g)
-        .map((c) => parseInt(c, 16)),
+      rgb = (bg.slice(1).match(/../g) ?? []).map((c) => parseInt(c, 16)),
       dark = rgb[0] * 0.299 + rgb[1] * 0.587 + rgb[2] * 0.114 < 145,
       ink = dark ? "#ffffff" : "#4a6576",
       muted = dark ? "#dceaf5" : "#8b9eab";
@@ -583,7 +839,7 @@ function render() {
             )
             .join("")
         : ""
-    }<g data-lane="${escape(l.id)}" role="button" tabindex="0" aria-label="${escape(l.name)}の行設定" style="cursor:pointer"><rect x="0" y="${y}" width="${laneWidth}" height="${height}" fill="transparent"/><text x="${nameX}" y="${y + height / 2 - (nameLines.length - 1) * 8 - 18}" font-size="9" fill="${muted}">${String(i + 1).padStart(2, "0")} / ${escape(l.type)}</text><text font-size="12" fill="${ink}" font-weight="600"><title>${escape(l.name)}</title>${nameLines.map((line, j) => `<tspan x="${nameX}" y="${y + height / 2 - (nameLines.length - 1) * 8 + j * 16 + 7}">${escape(line)}</tspan>`).join("")}</text></g><g data-lane-drag="${escape(l.id)}" role="button" tabindex="0" aria-label="${escape(l.name)}を並べ替え" style="cursor:grab;touch-action:none"><title>ドラッグして並べ替え</title><rect x="10" y="${y + height / 2 - 18}" width="24" height="34" rx="4" fill="transparent"/>${[0, 1, 2].map((r) => [0, 1].map((c) => `<circle cx="${18 + c * 6}" cy="${y + height / 2 - 7 + r * 6}" r="1.4" fill="${muted}"/>`).join("")).join("")}</g>${
+    }<g data-lane="${escapeHtml(l.id)}" role="button" tabindex="0" aria-label="${escapeHtml(l.name)}の行設定" style="cursor:pointer"><rect x="0" y="${y}" width="${laneWidth}" height="${height}" fill="transparent"/><text x="${nameX}" y="${y + height / 2 - (nameLines.length - 1) * 8 - 18}" font-size="9" fill="${muted}">${String(i + 1).padStart(2, "0")} / ${escapeHtml(l.type)}</text><text font-size="12" fill="${ink}" font-weight="600"><title>${escapeHtml(l.name)}</title>${nameLines.map((line, j) => `<tspan x="${nameX}" y="${y + height / 2 - (nameLines.length - 1) * 8 + j * 16 + 7}">${escapeHtml(line)}</tspan>`).join("")}</text></g><g data-lane-drag="${escapeHtml(l.id)}" role="button" tabindex="0" aria-label="${escapeHtml(l.name)}を並べ替え" style="cursor:grab;touch-action:none"><title>ドラッグして並べ替え</title><rect x="10" y="${y + height / 2 - 18}" width="24" height="34" rx="4" fill="transparent"/>${[0, 1, 2].map((r) => [0, 1].map((c) => `<circle cx="${18 + c * 6}" cy="${y + height / 2 - 7 + r * 6}" r="1.4" fill="${muted}"/>`).join("")).join("")}</g>${
       named
         ? `<g clip-path="url(#${labelId})" pointer-events="none">${(
             l.rowNames || []
@@ -591,7 +847,7 @@ function render() {
             .slice(0, laneRows(l))
             .map((name, row) =>
               name
-                ? `<text x="${split + 8}" y="${y + geometry.centers[row]}" dominant-baseline="middle" fill="${ink}" font-size="10"><title>${escape(name)}</title>${escape(name)}</text>`
+                ? `<text x="${split + 8}" y="${y + geometry.centers[row]}" dominant-baseline="middle" fill="${ink}" font-size="10"><title>${escapeHtml(name)}</title>${escapeHtml(name)}</text>`
                 : "",
             )
             .join("")}</g>`
@@ -626,55 +882,59 @@ function render() {
       start = e.startArrow === true,
       end = e.endArrow !== false;
     const mid = { x: (p.x + q.x) / 2, y: (p.y + q.y) / 2 };
-    markup += `<defs><marker id="arr${escape(e.id)}" viewBox="0 0 10 10" markerWidth="7" markerHeight="7" refX="9" refY="5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 Z" fill="${c}"/></marker></defs><path data-edge="${escape(e.id)}" d="${d}" fill="none" stroke="transparent" stroke-width="18" style="cursor:pointer"/><path data-edge="${escape(e.id)}" d="${d}" fill="none" stroke="${c}" stroke-width="${width}" stroke-linecap="round" stroke-dasharray="${e.dash === "dashed" ? "8 6" : e.dash === "dotted" ? "1 6" : ""}" ${start ? `marker-start="url(#arr${escape(e.id)})"` : ""} ${end ? `marker-end="url(#arr${escape(e.id)})"` : ""} style="cursor:pointer"/>${selected?.id === e.id ? `<path d="${d}" fill="none" stroke="#46a9df" stroke-width="${width + 5}" opacity=".2" pointer-events="none"/>` : ""}${e.label ? `<g data-edge="${escape(e.id)}" style="cursor:pointer"><rect x="${mid.x - Math.max(32, Array.from(e.label).length * 10 + 16) / 2}" y="${mid.y - 12}" width="${Math.max(32, Array.from(e.label).length * 10 + 16)}" height="24" rx="4" fill="${color(e.labelFill, "#ffffff")}"/><text x="${mid.x}" y="${mid.y + 4}" text-anchor="middle" font-size="11" fill="${c}">${escape(e.label)}</text></g>` : ""}`;
+    markup += `<defs><marker id="arr${escapeHtml(e.id)}" viewBox="0 0 10 10" markerWidth="7" markerHeight="7" refX="9" refY="5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 Z" fill="${c}"/></marker></defs><path data-edge="${escapeHtml(e.id)}" d="${d}" fill="none" stroke="transparent" stroke-width="18" style="cursor:pointer"/><path data-edge="${escapeHtml(e.id)}" d="${d}" fill="none" stroke="${c}" stroke-width="${width}" stroke-linecap="round" stroke-dasharray="${e.dash === "dashed" ? "8 6" : e.dash === "dotted" ? "1 6" : ""}" ${start ? `marker-start="url(#arr${escapeHtml(e.id)})"` : ""} ${end ? `marker-end="url(#arr${escapeHtml(e.id)})"` : ""} style="cursor:pointer"/>${selected?.id === e.id ? `<path d="${d}" fill="none" stroke="#46a9df" stroke-width="${width + 5}" opacity=".2" pointer-events="none"/>` : ""}${e.label ? `<g data-edge="${escapeHtml(e.id)}" style="cursor:pointer"><rect x="${mid.x - Math.max(32, Array.from(e.label).length * 10 + 16) / 2}" y="${mid.y - 12}" width="${Math.max(32, Array.from(e.label).length * 10 + 16)}" height="24" rx="4" fill="${color(e.labelFill, "#ffffff")}"/><text x="${mid.x}" y="${mid.y + 4}" text-anchor="middle" font-size="11" fill="${c}">${escapeHtml(e.label)}</text></g>` : ""}`;
   });
   data.nodes.forEach((n) => {
     let { x, y } = pos(n),
       sel = selected?.id === n.id,
       stroke = sel ? "#3597cc" : color(n.stroke, "#222222"),
       fill = color(n.fill, "#ffffff");
-    markup += `<g data-node="${escape(n.id)}" style="cursor:${"grab"}">${n.type === "decision" ? `<polygon points="${x},${y - 49} ${x + 80},${y} ${x},${y + 49} ${x - 80},${y}"` : `<rect x="${x - 76}" y="${y - 28}" width="152" height="56" rx="3"`} fill="${fill}" stroke="${stroke}" stroke-width="1.3"/>${lines(
+    markup += `<g data-node="${escapeHtml(n.id)}" style="cursor:${"grab"}">${n.type === "decision" ? `<polygon points="${x},${y - 49} ${x + 80},${y} ${x},${y + 49} ${x - 80},${y}"` : `<rect x="${x - 76}" y="${y - 28}" width="152" height="56" rx="3"`} fill="${fill}" stroke="${stroke}" stroke-width="1.3"/>${lines(
       n.text,
     )
       .slice(0, 3)
       .map(
         (t, i, arr) =>
-          `<text x="${x}" y="${y + (i - (arr.length - 1) / 2) * 17 + 4}" text-anchor="middle" fill="#293f4d" font-size="11">${escape(t)}</text>`,
+          `<text x="${x}" y="${y + (i - (arr.length - 1) / 2) * 17 + 4}" text-anchor="middle" fill="#293f4d" font-size="11">${escapeHtml(t)}</text>`,
       )
       .join("")}${
       mode === "edit" || reconnect
-        ? ["top", "right", "bottom", "left"]
+        ? (["top", "right", "bottom", "left"] as const)
             .map((side) => {
               const p = port(n, side);
-              return `<circle class="port" data-port="${side}" data-port-node="${escape(n.id)}" cx="${p.x}" cy="${p.y}" r="5" fill="#fff" stroke="#3597cc" stroke-width="2" role="button" aria-label="${escape(n.text)}の${{ top: "上", right: "右", bottom: "下", left: "左" }[side]}の接続点"/>`;
+              return `<circle class="port" data-port="${side}" data-port-node="${escapeHtml(n.id)}" cx="${p.x}" cy="${p.y}" r="5" fill="#fff" stroke="#3597cc" stroke-width="2" role="button" aria-label="${escapeHtml(n.text)}の${{ top: "上", right: "右", bottom: "下", left: "左" }[side]}の接続点"/>`;
             })
             .join("")
         : ""
     }</g>`;
   });
   if (selected?.kind === "edges") {
-    const e = data.edges.find((e) => e.id === selected.id);
+    const id = selected.id;
+    const e = data.edges.find((e) => e.id === id);
     if (e) {
       const a = data.nodes.find((n) => n.id === e.from),
-        b = data.nodes.find((n) => n.id === e.to),
-        sides = edgeSides(e, a, b);
-      for (const [end, n, side] of [
-        ["from", a, sides[0]],
-        ["to", b, sides[1]],
-      ]) {
-        const p = port(n, side);
-        markup += `<circle class="edge-handle" data-reconnect="${end}" data-edge-id="${escape(e.id)}" cx="${p.x}" cy="${p.y}" r="7" fill="white" stroke="#3597cc" stroke-width="2" role="button" aria-label="${end === "from" ? "始点" : "終点"}をつなぎ直す"/>`;
+        b = data.nodes.find((n) => n.id === e.to);
+      if (a && b) {
+        const sides = edgeSides(e, a, b);
+        for (const [end, n, side] of [
+          ["from", a, sides[0]],
+          ["to", b, sides[1]],
+        ] as const) {
+          const p = port(n, side);
+          markup += `<circle class="edge-handle" data-reconnect="${end}" data-edge-id="${escapeHtml(e.id)}" cx="${p.x}" cy="${p.y}" r="7" fill="white" stroke="#3597cc" stroke-width="2" role="button" aria-label="${end === "from" ? "始点" : "終点"}をつなぎ直す"/>`;
+        }
       }
     }
   }
   svg.innerHTML = markup;
-  for (const label of svg.querySelectorAll("g[data-edge]")) {
-    const path = Array.from(svg.querySelectorAll("path[data-edge]")).find(
-      (p) => p.dataset.edge === label.dataset.edge,
-    );
+  for (const label of svg.querySelectorAll<SVGGElement>("g[data-edge]")) {
+    const path = Array.from(
+      svg.querySelectorAll<SVGPathElement>("path[data-edge]"),
+    ).find((p) => p.dataset.edge === label.dataset.edge);
     if (path) {
       const point = path.getPointAtLength(path.getTotalLength() / 2),
         text = label.querySelector("text");
+      if (!text) continue;
       label.setAttribute(
         "transform",
         `translate(${point.x - Number(text.getAttribute("x"))},${point.y - Number(text.getAttribute("y")) + 4})`,
@@ -682,36 +942,39 @@ function render() {
     }
   }
   const laneSvg = $("#lanes-svg");
-  laneSvg.setAttribute("width", laneWidth * zoom);
-  laneSvg.setAttribute("height", h * zoom);
+  laneSvg.setAttribute("width", String(laneWidth * zoom));
+  laneSvg.setAttribute("height", String(h * zoom));
   laneSvg.setAttribute("viewBox", `0 0 ${laneWidth} ${h}`);
   laneSvg.innerHTML = `<g id="lane-overlay">${laneMarkup}</g>`;
   $("#sticky-lanes").style.width = laneWidth * zoom + "px";
   $("#scroll-content").style.width = w * zoom + "px";
   $("#scroll-content").style.height = h * zoom + "px";
   $("#lane-resize").style.left = laneWidth * zoom + "px";
-  $("#lane-resize").setAttribute("aria-valuenow", Math.round(laneWidth));
+  $("#lane-resize").setAttribute(
+    "aria-valuenow",
+    String(Math.round(laneWidth)),
+  );
   $("#lane-resize").setAttribute("aria-valuemin", "110");
   $("#lane-resize").setAttribute("aria-valuemax", "400");
   $("#stats").textContent =
     `${data.lanes.length} 行　・　${data.nodes.length} ステップ　・　${data.edges.length} 接続`;
   $("#canvas").style.transform = `scale(${zoom})`;
-  save();
+  updateLeaveWarning();
   if (typeof syncNameEditor === "function") syncNameEditor();
   if (typeof drawSegmentHandles === "function") drawSegmentHandles();
 }
-function toast(t) {
+let toastTimer: number | undefined;
+function toast(t: string) {
   $("#toast").textContent = t;
   $("#toast").style.display = "block";
-  clearTimeout(window.tt);
-  window.tt = setTimeout(() => ($("#toast").style.display = "none"), 2800);
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => ($("#toast").style.display = "none"), 2800);
 }
-function setMode(m) {
+function setMode(m: EditorMode) {
   mode = m;
-  source = null;
   pending = null;
   $("#pending-edge")?.remove();
-  for (let id of ["select", "edit"])
+  for (let id of ["select", "edit"] as const)
     $("#" + id).classList.toggle("active", id === m);
   $("#diagram").style.cursor = m === "select" ? "default" : "crosshair";
   render();
@@ -739,7 +1002,7 @@ function sharedColors() {
     ),
   ];
 }
-function addSharedColor(value) {
+function addSharedColor(value: string) {
   const c = value.toLowerCase();
   if (!/^#[0-9a-f]{6}$/.test(c)) return false;
   const colors = sharedColors();
@@ -753,7 +1016,12 @@ function addSharedColor(value) {
   data.customColors = colors;
   return true;
 }
-function colorEditor(root, label, value, apply) {
+function colorEditor(
+  root: HTMLElement,
+  label: string,
+  value: string | null,
+  apply: ((color: string) => void) | null,
+) {
   const group = document.createElement("div");
   group.className = "field color-field";
   const heading = document.createElement("label");
@@ -763,7 +1031,7 @@ function colorEditor(root, label, value, apply) {
   palette.className = "color-grid";
   palette.setAttribute("role", "group");
   palette.setAttribute("aria-label", label + "の固定カラー");
-  function swatch(container, c) {
+  function swatch(container: HTMLElement, c: string) {
     const b = document.createElement("button");
     b.type = "button";
     b.className = "color-swatch";
@@ -814,7 +1082,7 @@ function colorEditor(root, label, value, apply) {
   const add = document.createElement("button");
   add.type = "button";
   add.textContent = apply ? "追加して適用" : "追加";
-  function commit(v) {
+  function commit(v: string) {
     if (!/^#[0-9a-f]{6}$/i.test(v)) {
       hex.setCustomValidity("#と6桁のカラーコードを入力してください");
       hex.reportValidity();
@@ -847,12 +1115,12 @@ function colorEditor(root, label, value, apply) {
   group.append(details);
   root.append(group);
 }
-function globalProperties(root) {
+function globalProperties(root: HTMLElement) {
   root.innerHTML = "";
   colorEditor(root, "共通カラーパレット", null, null);
   workspaceSettings(root);
 }
-function connectionSearch(root, obj) {
+function connectionSearch(root: HTMLElement, obj: FlowNode) {
   const div = document.createElement("div");
   div.className = "field connection-search";
   const lab = document.createElement("label");
@@ -890,7 +1158,7 @@ function connectionSearch(root, obj) {
   const add = document.createElement("button");
   add.textContent = "矢印を追加";
   add.disabled = true;
-  let targetId = null,
+  let targetId: string | null = null,
     limit = 20;
   function refresh() {
     results.innerHTML = "";
@@ -1016,7 +1284,11 @@ function connectionSearch(root, obj) {
   root.append(div);
   refresh();
 }
-function confirmAction(title, message, action) {
+function confirmAction(
+  title: string,
+  message: string,
+  action: string,
+): Promise<boolean> {
   const dialog = $("#confirm-dialog");
   if (dialog.open) return Promise.resolve(false);
   $("#confirm-title").textContent = title;
@@ -1051,7 +1323,7 @@ function confirmAction(title, message, action) {
     $("#confirm-cancel").focus();
   });
 }
-function properties() {
+let properties = function properties() {
   $("#tip-popover")?.remove();
   $("#line-popover")?.remove();
   document.body.classList.toggle("has-selection", !!selected);
@@ -1066,68 +1338,53 @@ function properties() {
     globalProperties(root);
     return;
   }
-  let obj = data[selected.kind].find((x) => x.id === selected.id);
-  if (!obj) {
-    selected = null;
-    return properties();
-  }
-  let kind = selected.kind;
+  const { kind, id } = selected;
   root.innerHTML = "";
-  function field(label, key, type = "text", options) {
-    if (type === "color") {
-      colorEditor(
-        root,
-        label,
-        color(obj[key], "#ffffff"),
-        (c) => (obj[key] = c),
-      );
-      return;
-    }
-    let div = document.createElement("div");
+  function textField<K extends string>(
+    label: string,
+    obj: Record<K, string>,
+    key: K,
+    multiline = false,
+  ) {
+    const div = document.createElement("div");
     div.className = "field";
-    let lab = document.createElement("label");
+    const lab = document.createElement("label");
     lab.textContent = label;
     lab.htmlFor = "prop-" + key;
-    let el = document.createElement(
-      type === "textarea" ? "textarea" : type === "select" ? "select" : "input",
-    );
-    el.id = "prop-" + key;
-    if (type !== "textarea" && type !== "select") el.type = type;
-    if (options)
-      options.forEach(([v, t]) => {
-        let o = document.createElement("option");
-        o.value = v;
-        o.textContent = t;
-        el.append(o);
-      });
-    el.value = obj[key] ?? (type === "color" ? "#ffffff" : "");
-    el.onchange = () => {
-      checkpoint();
-      obj[key] = key === "row" ? Number(el.value) : el.value;
-      if (key === "lane") {
-        obj.row = Math.min(
-          obj.row || 0,
-          laneRows(data.lanes.find((l) => l.id === obj.lane)) - 1,
-        );
-        render();
-        properties();
-        return;
-      }
-      render();
+    const el = document.createElement(multiline ? "textarea" : "input");
+    el.id = lab.htmlFor;
+    el.maxLength =
+      key === "text"
+        ? LIMITS.textChars
+        : key === "label"
+          ? LIMITS.labelChars
+          : LIMITS.nameChars;
+    el.value = obj[key];
+    const update = () => {
+      if (setText(obj, key, el.value, el, el.maxLength)) render();
     };
-    if (key === "text") {
-      el.onchange = null;
+    if (multiline) {
       el.onfocus = () => checkpoint();
-      el.oninput = () => {
-        obj.text = el.value;
-        render();
+      el.oninput = update;
+    } else {
+      trackDraft(el as HTMLInputElement, () => obj[key]);
+      el.onchange = () => {
+        checkpoint();
+        update();
+        updateLeaveWarning();
       };
     }
     div.append(lab, el);
     root.append(div);
   }
   if (kind === "nodes") {
-    field("図形名", "text", "textarea");
+    const obj = data.nodes.find((item) => item.id === id);
+    if (!obj) {
+      selected = null;
+      properties();
+      return;
+    }
+    textField("図形名", obj, "text", true);
     const types = document.createElement("fieldset");
     types.className = "shape-types";
     const legend = document.createElement("legend");
@@ -1136,12 +1393,12 @@ function properties() {
     for (const [value, text] of [
       ["action", "アクション"],
       ["decision", "分岐"],
-    ]) {
+    ] as const) {
       const label = document.createElement("label");
       const input = document.createElement("input");
       input.type = "radio";
       input.name = "shape-type";
-      input.value = value;
+      input.value = String(value);
       input.checked = obj.type === value;
       input.onchange = () => {
         checkpoint();
@@ -1158,13 +1415,29 @@ function properties() {
       types.append(label);
     }
     root.append(types);
-    field("背景色", "fill", "color");
+    colorEditor(
+      root,
+      "背景色",
+      color(obj.fill, "#ffffff"),
+      (c) => (obj.fill = c),
+    );
     if (!obj.stroke) obj.stroke = "#222222";
-    field("枠線色", "stroke", "color");
+    colorEditor(
+      root,
+      "枠線色",
+      color(obj.stroke, "#222222"),
+      (c) => (obj.stroke = c),
+    );
     connectionSearch(root, obj);
   }
   if (kind === "lanes") {
-    field("行の名前", "name");
+    const obj = data.lanes.find((item) => item.id === id);
+    if (!obj) {
+      selected = null;
+      properties();
+      return;
+    }
+    textField("行の名前", obj, "name");
     const rowField = document.createElement("div");
     rowField.className = "field";
     const rowLabel = document.createElement("label");
@@ -1176,8 +1449,8 @@ function properties() {
     count.min = "1";
     count.max = "20";
     count.step = "1";
-    count.value = laneRows(obj);
-    count.onchange = async () => {
+    count.value = String(laneRows(obj));
+    const changeCount = async () => {
       const value = Number(count.value);
       if (!Number.isInteger(value) || value < 1 || value > 20) {
         count.setCustomValidity("1〜20の整数を入力してください");
@@ -1190,7 +1463,7 @@ function properties() {
       const affected = data.nodes.filter(
         (n) => n.lane === obj.id && (n.row || 0) >= value,
       );
-      count.value = old;
+      count.value = String(old);
       if (value < old && affected.length) {
         count.disabled = true;
         decrease.disabled = true;
@@ -1206,7 +1479,7 @@ function properties() {
         if (!approved) return;
       }
       checkpoint();
-      count.value = value;
+      count.value = String(value);
       obj.rows = value;
       decrease.disabled = value <= 1;
       increase.disabled = value >= 20;
@@ -1216,6 +1489,7 @@ function properties() {
       render();
       refreshRowNamesEditor(root, obj);
     };
+    count.onchange = changeCount;
     count.oninput = () => count.setCustomValidity("");
     const controls = document.createElement("div");
     controls.className = "row-count-controls";
@@ -1236,12 +1510,12 @@ function properties() {
     decrease.disabled = laneRows(obj) <= 1;
     increase.disabled = laneRows(obj) >= 20;
     decrease.onclick = () => {
-      count.value = Math.max(1, laneRows(obj) - 1);
-      count.onchange();
+      count.value = String(Math.max(1, laneRows(obj) - 1));
+      void changeCount();
     };
     increase.onclick = () => {
-      count.value = Math.min(20, laneRows(obj) + 1);
-      count.onchange();
+      count.value = String(Math.min(20, laneRows(obj) + 1));
+      void changeCount();
     };
     controls.append(count, increase, decrease);
     rowField.append(rowLabel, controls);
@@ -1265,12 +1539,13 @@ function properties() {
       const input = document.createElement("input");
       input.type = "radio";
       input.name = "lane-type";
-      input.value = value;
+      input.value = String(value);
       input.checked = value === "自由入力" ? isCustom : obj.type === value;
       input.onchange = () => {
         checkpoint();
-        obj.customType = value === "自由入力";
-        obj.type = obj.customType ? free.value : value;
+        const custom = value === "自由入力";
+        if (!setText(obj, "type", custom ? free.value : value, free)) return;
+        obj.customType = custom;
         free.hidden = value !== "自由入力";
         render();
         if (!free.hidden) free.focus();
@@ -1280,7 +1555,7 @@ function properties() {
     }
     free.oninput = () => {
       obj.customType = true;
-      obj.type = free.value;
+      setText(obj, "type", free.value, free);
       render();
     };
     free.onfocus = () => checkpoint();
@@ -1309,7 +1584,7 @@ function properties() {
       render();
       properties();
     };
-    root.lastElementChild.append(resetColor);
+    root.lastElementChild?.append(resetColor);
     let up = document.createElement("button");
     up.textContent = "↑ 上へ";
     up.onclick = () => moveLane(-1);
@@ -1319,11 +1594,28 @@ function properties() {
     root.append(up, down);
   }
   if (kind === "edges") {
-    field("矢印のラベル", "label");
+    const edge = data.edges.find((item) => item.id === id);
+    if (!edge) {
+      selected = null;
+      properties();
+      return;
+    }
+    const obj = edge;
+    textField("矢印のラベル", obj, "label");
     obj.labelFill ??= "#ffffff";
-    field("ラベル背景色", "labelFill", "color");
+    colorEditor(
+      root,
+      "ラベル背景色",
+      color(obj.labelFill, "#ffffff"),
+      (c) => (obj.labelFill = c),
+    );
     obj.color ??= "#222222";
-    field("色", "color", "color");
+    colorEditor(
+      root,
+      "色",
+      color(obj.color, "#222222"),
+      (c) => (obj.color = c),
+    );
     obj.startArrow ??= false;
     obj.endArrow ??= true;
     obj.dash ??= "solid";
@@ -1331,12 +1623,13 @@ function properties() {
     obj.width ??= 1.5;
     const row = document.createElement("div");
     row.className = "arrow-controls";
-    function tipIcon(on, start) {
+    function tipIcon(on: boolean | undefined, start: boolean) {
       return `<svg viewBox="0 0 40 24" aria-hidden="true"><path d="M5 12 H35" stroke="currentColor" stroke-width="2"/>${on ? (start ? '<path d="M5 12 L17 6 V18 Z" fill="currentColor"/>' : '<path d="M35 12 L23 6 V18 Z" fill="currentColor"/>') : ""}</svg>`;
     }
-    const tipButtons = {};
+    type ArrowKey = "startArrow" | "endArrow";
+    const tipButtons: Partial<Record<ArrowKey, HTMLButtonElement>> = {};
     function updateTips() {
-      for (const key of ["startArrow", "endArrow"]) {
+      for (const key of ["startArrow", "endArrow"] as const) {
         const button = tipButtons[key];
         if (button) {
           button.innerHTML =
@@ -1349,7 +1642,7 @@ function properties() {
         }
       }
     }
-    function tipButton(key, label) {
+    function tipButton(key: ArrowKey, label: string) {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "tip-button";
@@ -1428,8 +1721,8 @@ function properties() {
       orthogonal: "M5 24 H18 V14 H31",
       curve: "M5 23 C12 9 24 31 31 17",
     };
-    function lineIcon(shape, dash) {
-      return `<svg viewBox="0 0 36 36" aria-hidden="true"><path d="${shapePaths[shape] || shapePaths.orthogonal}" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-dasharray="${dash === "dashed" ? "5 4" : dash === "dotted" ? "1 5" : ""}"/></svg>`;
+    function lineIcon(shape?: LineShape, dash?: LineDash) {
+      return `<svg viewBox="0 0 36 36" aria-hidden="true"><path d="${shapePaths[shape ?? "orthogonal"]}" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-dasharray="${dash === "dashed" ? "5 4" : dash === "dotted" ? "1 5" : ""}"/></svg>`;
     }
     function updateTypeButton() {
       typeButton.innerHTML =
@@ -1451,7 +1744,7 @@ function properties() {
     input.max = "12";
     input.step = ".5";
     input.id = "prop-width";
-    input.value = obj.width;
+    input.value = String(obj.width);
     const output = document.createElement("output");
     output.htmlFor = input.id;
     output.textContent = obj.width + " px";
@@ -1484,23 +1777,33 @@ function properties() {
       shapeRow.className = "line-options";
       const dashRow = document.createElement("div");
       dashRow.className = "line-options";
-      function option(container, key, value, label, icon) {
+      function option<K extends "shape" | "dash">(
+        container: HTMLElement,
+        key: K,
+        value: FlowEdge[K],
+        label: string,
+        icon: string,
+      ) {
         const b = document.createElement("button");
         b.type = "button";
         b.setAttribute("aria-label", label);
         b.title = label;
         b.innerHTML = icon;
         b.dataset.optionKey = key;
-        b.dataset.optionValue = value;
+        b.dataset.optionValue = value ?? "";
         b.setAttribute("aria-pressed", String(obj[key] === value));
         b.onclick = () => {
           checkpoint();
           obj[key] = value;
-          for (const button of pop.querySelectorAll("button[data-option-key]"))
+          for (const button of pop.querySelectorAll<HTMLButtonElement>(
+            "button[data-option-key]",
+          ))
             button.setAttribute(
               "aria-pressed",
               String(
-                obj[button.dataset.optionKey] === button.dataset.optionValue,
+                (button.dataset.optionKey === "shape"
+                  ? obj.shape
+                  : obj.dash) === button.dataset.optionValue,
               ),
             );
           updateTypeButton();
@@ -1512,13 +1815,13 @@ function properties() {
         ["straight", "直線"],
         ["orthogonal", "直角"],
         ["curve", "曲線"],
-      ])
+      ] as const)
         option(shapeRow, "shape", value, label, lineIcon(value, "solid"));
       for (const [value, label] of [
         ["solid", "実線"],
         ["dashed", "破線"],
         ["dotted", "点線"],
-      ])
+      ] as const)
         option(
           dashRow,
           "dash",
@@ -1546,11 +1849,12 @@ function properties() {
   del.textContent = kind === "lanes" ? "行とその中のステップを削除" : "削除";
   del.onclick = remove;
   if (kind !== "nodes") root.append(del);
-}
-function moveLane(dir) {
-  let i = data.lanes.findIndex((l) => l.id === selected.id),
+};
+function moveLane(dir: number) {
+  const id = selected?.id;
+  let i = data.lanes.findIndex((l) => l.id === id),
     j = i + dir;
-  if (j < 0 || j >= data.lanes.length) return;
+  if (i < 0 || j < 0 || j >= data.lanes.length) return;
   checkpoint();
   [data.lanes[i], data.lanes[j]] = [data.lanes[j], data.lanes[i]];
   render();
@@ -1582,7 +1886,10 @@ async function remove() {
       : target.kind === "nodes"
         ? [target.id]
         : [];
-  data[target.kind] = data[target.kind].filter((o) => o.id !== target.id);
+  if (target.kind === "lanes")
+    data.lanes = data.lanes.filter((l) => l.id !== target.id);
+  if (target.kind === "edges")
+    data.edges = data.edges.filter((e) => e.id !== target.id);
   data.nodes = data.nodes.filter((n) => !ids.includes(n.id));
   data.edges = data.edges.filter(
     (e) => !ids.includes(e.from) && !ids.includes(e.to),
@@ -1592,18 +1899,41 @@ async function remove() {
   properties();
 }
 
-let laneDrag = null,
+function eventElement(event: Event): Element | null {
+  return event.target instanceof Element ? event.target : null;
+}
+function closestItem(event: Event, selector: string): SVGElement | null {
+  return eventElement(event)?.closest<SVGElement>(selector) ?? null;
+}
+let laneDrag: {
+    id: string;
+    startY: number;
+    to: number;
+    moved: boolean;
+  } | null = null,
   suppressLaneClick = false,
   connecting = false,
-  connectionStart = null;
+  connectionStart: Point | null = null;
 function suppressClick() {
   suppressLaneClick = true;
   setTimeout(() => (suppressLaneClick = false), 0);
 }
-let drag = null;
+let drag: {
+  id: string;
+  startX: number;
+  startY: number;
+  x: number;
+  lane: string;
+  y: number;
+  moved: boolean;
+} | null = null;
 $(".stage").addEventListener("pointerdown", (e) => {
-  const endpoint = e.target.closest("[data-reconnect]");
-  if (endpoint) {
+  const endpoint = closestItem(e, "[data-reconnect]");
+  if (
+    endpoint?.dataset.edgeId &&
+    (endpoint.dataset.reconnect === "from" ||
+      endpoint.dataset.reconnect === "to")
+  ) {
     e.preventDefault();
     reconnect = {
       edgeId: endpoint.dataset.edgeId,
@@ -1614,18 +1944,23 @@ $(".stage").addEventListener("pointerdown", (e) => {
     $("#diagram").setPointerCapture(e.pointerId);
     return;
   }
-  if (e.target.closest("[data-port]") && mode === "edit") {
+  const el = closestItem(e, "[data-port]");
+  const side = el?.dataset.port;
+  if (
+    el?.dataset.portNode &&
+    mode === "edit" &&
+    (side === "top" || side === "right" || side === "bottom" || side === "left")
+  ) {
     e.preventDefault();
-    const el = e.target.closest("[data-port]");
-    pending = { id: el.dataset.portNode, side: el.dataset.port };
+    pending = { id: el.dataset.portNode, side };
     connecting = true;
     document.body.classList.add("is-reconnecting");
     connectionStart = { x: e.clientX, y: e.clientY };
     $("#diagram").setPointerCapture(e.pointerId);
     return;
   }
-  const handle = e.target.closest("[data-lane-drag]");
-  if (handle) {
+  const handle = closestItem(e, "[data-lane-drag]");
+  if (handle?.dataset.laneDrag) {
     e.preventDefault();
     laneDrag = {
       id: handle.dataset.laneDrag,
@@ -1636,9 +1971,10 @@ $(".stage").addEventListener("pointerdown", (e) => {
     $("#diagram").setPointerCapture(e.pointerId);
     return;
   }
-  let node = e.target.closest("[data-node]");
+  let node = closestItem(e, "[data-node]");
   if (node) {
     let n = data.nodes.find((n) => n.id === node.dataset.node);
+    if (!n) return;
     drag = {
       id: n.id,
       startX: e.clientX,
@@ -1652,10 +1988,13 @@ $(".stage").addEventListener("pointerdown", (e) => {
 });
 $(".stage").addEventListener("pointermove", (e) => {
   if (reconnect) {
+    const current = reconnect;
+    const e1 = data.edges.find((e) => e.id === current.edgeId);
+    if (!e1) return;
+    const a = data.nodes.find((n) => n.id === e1.from),
+      b = data.nodes.find((n) => n.id === e1.to);
+    if (!a || !b) return;
     const r = $("#diagram").getBoundingClientRect(),
-      e1 = data.edges.find((e) => e.id === reconnect.edgeId),
-      a = data.nodes.find((n) => n.id === e1.from),
-      b = data.nodes.find((n) => n.id === e1.to),
       sides = edgeSides(e1, a, b),
       candidate = snapTarget(
         e.clientX,
@@ -1714,9 +2053,9 @@ $(".stage").addEventListener("pointermove", (e) => {
     const mark = document.createElementNS(NS, "line");
     mark.id = "lane-drop";
     mark.setAttribute("x1", "0");
-    mark.setAttribute("x2", $("#diagram").getAttribute("width"));
-    mark.setAttribute("y1", laneTop(laneDrag.to));
-    mark.setAttribute("y2", laneTop(laneDrag.to));
+    mark.setAttribute("x2", $("#diagram").getAttribute("width") ?? "0");
+    mark.setAttribute("y1", String(laneTop(laneDrag.to)));
+    mark.setAttribute("y2", String(laneTop(laneDrag.to)));
     mark.setAttribute("stroke", "#3597cc");
     mark.setAttribute("stroke-width", "4");
     mark.setAttribute("pointer-events", "none");
@@ -1731,7 +2070,9 @@ $(".stage").addEventListener("pointermove", (e) => {
   drag.moved = true;
   if (!$("#diagram").hasPointerCapture(e.pointerId))
     $("#diagram").setPointerCapture(e.pointerId);
-  let n = data.nodes.find((n) => n.id === drag.id);
+  const dragId = drag.id;
+  let n = data.nodes.find((n) => n.id === dragId);
+  if (!n) return;
   n.x = Math.min(100000, Math.max(250, Math.round((drag.x + dx) / 10) * 10));
   const placement = placementAtY(drag.y + dy);
   n.lane = placement.lane;
@@ -1750,6 +2091,7 @@ $(".stage").addEventListener("pointerup", (e) => {
       r = $("#diagram").getBoundingClientRect(),
       x = (e.clientX - r.left) / zoom,
       y = (e.clientY - r.top) / zoom;
+    if (!edge) return;
     const candidate = snapTarget(
       e.clientX,
       e.clientY,
@@ -1775,7 +2117,7 @@ $(".stage").addEventListener("pointerup", (e) => {
     $("#pending-edge")?.remove();
     $("#pending-defs")?.remove();
     suppressClick();
-    if (!origin) return;
+    if (!origin || !connectionStart) return;
     const click =
       Math.hypot(e.clientX - connectionStart.x, e.clientY - connectionStart.y) <
       5;
@@ -1811,9 +2153,10 @@ $(".stage").addEventListener("pointerup", (e) => {
     } else checkpoint();
     if (!side) {
       const sourceNode = data.nodes.find((n) => n.id === origin.id);
+      if (!sourceNode) return;
       side = edgeSides({}, sourceNode, node)[1];
     }
-    const edge = {
+    const edge: FlowEdge = {
       id: uid(),
       from: origin.id,
       to: node.id,
@@ -1863,19 +2206,19 @@ $(".stage").addEventListener("pointerup", (e) => {
   } else drag = null;
 });
 $(".stage").addEventListener("click", (e) => {
-  if (e.target.closest("#lane-resize")) return;
+  if (closestItem(e, "#lane-resize")) return;
   if (
-    e.target.closest("[data-reconnect]") ||
+    closestItem(e, "[data-reconnect]") ||
     drag?.moved ||
     suppressLaneClick ||
-    e.target.closest("[data-lane-drag]")
+    closestItem(e, "[data-lane-drag]")
   )
     return;
-  if (e.target.closest("[data-port]")) return;
-  let node = e.target.closest("[data-node]"),
-    lane = e.target.closest("[data-lane]"),
-    edge = e.target.closest("[data-edge]");
-  if (lane) {
+  if (closestItem(e, "[data-port]")) return;
+  let node = closestItem(e, "[data-node]"),
+    lane = closestItem(e, "[data-lane]"),
+    edge = closestItem(e, "[data-edge]");
+  if (lane?.dataset.lane) {
     selected = { kind: "lanes", id: lane.dataset.lane };
     render();
     properties();
@@ -1895,7 +2238,7 @@ $(".stage").addEventListener("click", (e) => {
     if (x < 180 || y < 42) return;
     if (!canAdd({ nodes: 1 })) return;
     checkpoint();
-    let n = {
+    const n: FlowNode = {
       id: uid(),
       type: "action",
       ...placementAtY(y),
@@ -1910,38 +2253,39 @@ $(".stage").addEventListener("click", (e) => {
     return;
   }
   if (
-    node &&
+    node?.dataset.node &&
     selected?.id === node.dataset.node &&
-    e.target.tagName.toLowerCase() === "text"
+    eventElement(e)?.tagName.toLowerCase() === "text"
   ) {
     beginNameEdit(node.dataset.node);
     return;
   }
-  selected = node
+  selected = node?.dataset.node
     ? { kind: "nodes", id: node.dataset.node }
-    : lane
+    : lane?.dataset.lane
       ? { kind: "lanes", id: lane.dataset.lane }
-      : edge
+      : edge?.dataset.edge
         ? { kind: "edges", id: edge.dataset.edge }
         : null;
   render();
   properties();
 });
 $(".stage").addEventListener("dblclick", (e) => {
-  const node = e.target.closest("[data-node]");
-  if (node) {
+  const node = closestItem(e, "[data-node]");
+  if (node?.dataset.node) {
     drag = null;
     beginNameEdit(node.dataset.node);
     return;
   }
-  const lane = e.target.closest("[data-lane]");
-  if (lane) {
+  const lane = closestItem(e, "[data-lane]");
+  if (lane?.dataset.lane) {
     selected = { kind: "lanes", id: lane.dataset.lane };
     properties();
     $("#prop-name")?.focus();
   }
 });
-for (let id of ["select", "edit"]) $("#" + id).onclick = () => setMode(id);
+for (let id of ["select", "edit"] as const)
+  $("#" + id).onclick = () => setMode(id);
 $("#addlane").onclick = () => {
   if (!canAdd({ lanes: 1 })) return;
   checkpoint();
@@ -1954,24 +2298,26 @@ $("#addlane").onclick = () => {
   $("#properties input").focus();
   $("#properties input").select();
 };
-$("#title").onchange = (e) => {
+trackDraft($("#title"), () => data.title);
+$("#title").onchange = () => {
+  const input = $("#title");
   checkpoint();
-  data.title = e.target.value || "untitled";
+  setText(data, "title", input.value || "untitled", input, LIMITS.titleChars);
   render();
 };
-function history(dir) {
+function moveHistory(dir: "undo" | "redo") {
   let a = dir === "undo" ? past : future,
     b = dir === "undo" ? future : past;
   if (!a.length) return;
   b.push(JSON.stringify(data));
-  data = JSON.parse(a.pop());
+  data = JSON.parse(a.pop()!);
   laneWidth = Math.max(110, Math.min(400, Number(data.laneWidth) || 164));
   selected = null;
   render();
   properties();
 }
 
-function setZoom(d) {
+function setZoom(d: number) {
   zoom = Math.max(0.5, Math.min(1.5, Math.round((zoom + d) * 10) / 10));
   $("#zoomlabel").textContent = Math.round(zoom * 100) + "%";
   render();
@@ -1983,15 +2329,16 @@ function exportJSON() {
     toast("フローのデータが保存条件を満たしていません");
     return false;
   }
-  const json = JSON.stringify(data, null, 2);
+  const json = JSON.stringify(normalizeProject(data), null, 2);
   if (new Blob([json]).size > LIMITS.jsonBytes) {
     toast("JSONは5MBまでです。図形名やラベルの内容を減らしてください");
     return false;
   }
   download(json, "application/json", "json");
+  markProjectSaved();
   return true;
 }
-function download(content, type, extension) {
+function download(content: BlobPart, type: string, extension: string) {
   let a = document.createElement("a"),
     url = URL.createObjectURL(new Blob([content], { type }));
   a.href = url;
@@ -2011,7 +2358,7 @@ function cleanExportSVG() {
     render();
   }
 }
-async function exportImage(format) {
+async function exportImage(format: "png" | "jpg") {
   const svg = cleanExportSVG(),
     doc = new DOMParser().parseFromString(svg, "image/svg+xml"),
     width = Number(doc.documentElement.getAttribute("width")),
@@ -2043,7 +2390,9 @@ async function exportImage(format) {
     context.fillRect(0, 0, canvas.width, canvas.height);
     context.drawImage(image, 0, 0, canvas.width, canvas.height);
     const type = format === "jpg" ? "image/jpeg" : "image/png",
-      blob = await new Promise((resolve) => canvas.toBlob(resolve, type, 0.95));
+      blob = await new Promise<Blob | null>((resolve) =>
+        canvas.toBlob(resolve, type, 0.95),
+      );
     if (!blob) throw new Error("画像を書き出せませんでした");
     download(blob, type, format);
   } finally {
@@ -2054,7 +2403,7 @@ async function exportImage(format) {
 function exportHTML() {
   const svg = cleanExportSVG();
   download(
-    `<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escape(data.title)}</title><style>body{margin:0;background:#fbfdff;font-family:Arial,"Hiragino Kaku Gothic ProN",Meiryo,sans-serif}main{width:max-content;min-width:100vw}svg{display:block}svg [role="button"]{cursor:default!important}@media print{svg{max-width:100%;height:auto}main{width:100%;min-width:0}@page{size:landscape;margin:10mm}}</style></head><body><main>${svg}</main></body></html>`,
+    `<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(data.title)}</title><style>body{margin:0;background:#fbfdff;font-family:Arial,"Hiragino Kaku Gothic ProN",Meiryo,sans-serif}main{width:max-content;min-width:100vw}svg{display:block}svg [role="button"]{cursor:default!important}@media print{svg{max-width:100%;height:auto}main{width:100%;min-width:0}@page{size:landscape;margin:10mm}}</style></head><body><main>${svg}</main></body></html>`,
     "text/html;charset=utf-8",
     "html",
   );
@@ -2087,7 +2436,7 @@ $("#export").onclick = () => {
     ["PNG画像を書き出す", () => exportImage("png")],
     ["JPG画像を書き出す", () => exportImage("jpg")],
     ["HTMLを書き出す（閲覧用）", exportHTML],
-  ]) {
+  ] as const) {
     const button = document.createElement("button");
     button.textContent = text;
     button.style.display = "block";
@@ -2108,15 +2457,16 @@ $("#export").onclick = () => {
 };
 $("#import").onclick = () => $("#file").click();
 $("#file").onchange = async (e) => {
-  let f = e.target.files[0];
+  const input = e.target as HTMLInputElement | null;
+  const f = input?.files?.[0];
   if (!f) return;
   try {
     if (f.size > LIMITS.jsonBytes) {
       toast("JSONは5MBまで読み込めます");
       return;
     }
-    let d = JSON.parse(await f.text());
-    if (!valid(d)) throw Error();
+    const raw: unknown = JSON.parse(await f.text());
+    const d = normalizeProject(raw);
     if (
       !(await confirmAction(
         "フローを読み込みますか？",
@@ -2125,27 +2475,33 @@ $("#file").onchange = async (e) => {
       ))
     )
       return;
-    checkpoint();
-    data = d;
-    laneWidth = Math.max(110, Math.min(400, Number(d.laneWidth) || 164));
-    selected = null;
-    pending = null;
-    render();
-    properties();
+    const snapshot = JSON.stringify(data);
+    replaceProject(d);
+    markProjectSaved();
+    past.push(snapshot);
+    if (past.length > 60) past.shift();
+    future = [];
     toast("フローを読み込みました");
-  } catch {
-    toast("対応するJSONファイルを選んでください");
+  } catch (error) {
+    toast(
+      "読み込めませんでした：" +
+        (error instanceof Error ? error.message : String(error)),
+    );
   } finally {
-    e.target.value = "";
+    if (input) input.value = "";
   }
 };
 document.addEventListener("keydown", (e) => {
   if ($("#confirm-dialog").open || $("#setup-dialog")?.open) return;
-  if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName))
+  if (
+    ["INPUT", "TEXTAREA", "SELECT"].includes(
+      document.activeElement?.tagName ?? "",
+    )
+  )
     return;
   if ((e.metaKey || e.ctrlKey) && e.key === "z") {
     e.preventDefault();
-    history(e.shiftKey ? "redo" : "undo");
+    moveHistory(e.shiftKey ? "redo" : "undo");
     return;
   }
   if (e.key === "Delete" || e.key === "Backspace") {
@@ -2174,13 +2530,14 @@ for (const [id, label] of Object.entries({
   zoomin: "拡大",
   zoomout: "縮小",
 })) {
-  document.getElementById(id).setAttribute("aria-label", label);
-  document.getElementById(id).title = label;
+  document.getElementById(id)?.setAttribute("aria-label", label);
+  const button = document.getElementById(id);
+  if (button) button.title = label;
 }
 
 $(".stage").addEventListener("keydown", (e) => {
-  const lane = e.target.closest("[data-lane]");
-  if (lane && (e.key === "Enter" || e.key === " ")) {
+  const lane = closestItem(e, "[data-lane]");
+  if (lane?.dataset.lane && (e.key === "Enter" || e.key === " ")) {
     e.preventDefault();
     selected = { kind: "lanes", id: lane.dataset.lane };
     render();
@@ -2201,15 +2558,18 @@ $(".stage").addEventListener("pointercancel", () => {
   $("#lane-drop")?.remove();
 });
 $(".stage").addEventListener("keydown", (e) => {
-  const handle = e.target.closest("[data-lane-drag]");
-  if (handle && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+  const handle = closestItem(e, "[data-lane-drag]");
+  if (
+    handle?.dataset.laneDrag &&
+    (e.key === "ArrowUp" || e.key === "ArrowDown")
+  ) {
     e.preventDefault();
     selected = { kind: "lanes", id: handle.dataset.laneDrag };
     moveLane(e.key === "ArrowUp" ? -1 : 1);
     properties();
     const next = Array.from(
-      $("#lanes-svg").querySelectorAll("[data-lane-drag]"),
-    ).find((el) => el.dataset.laneDrag === selected.id);
+      $("#lanes-svg").querySelectorAll<SVGElement>("[data-lane-drag]"),
+    ).find((el) => el.dataset.laneDrag === handle.dataset.laneDrag);
     next?.focus();
   }
 });
@@ -2222,7 +2582,7 @@ $("#close-properties").onclick = () => {
   render();
 };
 
-let resizing = null;
+let resizing: { x: number; width: number } | null = null;
 $("#lane-resize").addEventListener("pointerdown", (e) => {
   e.preventDefault();
   resizing = { x: e.clientX, width: laneWidth };
@@ -2250,14 +2610,14 @@ $("#lane-resize").addEventListener("keydown", (e) => {
 });
 
 document.addEventListener("pointerdown", (e) => {
-  if (!e.target.closest("#line-popover,#line-type")) {
+  if (!closestItem(e, "#line-popover,#line-type")) {
     $("#line-popover")?.remove();
     $("#line-type")?.setAttribute("aria-expanded", "false");
   }
 });
 
 document.addEventListener("pointerdown", (e) => {
-  if (!e.target.closest("#tip-popover,.tip-button")) {
+  if (!closestItem(e, "#tip-popover,.tip-button")) {
     $("#tip-popover")?.remove();
     document
       .querySelectorAll(".tip-button")

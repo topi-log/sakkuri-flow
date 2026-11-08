@@ -1,5 +1,13 @@
-var nameEditing = null,
-  segmentDrag = null;
+var nameEditing: { id: string; input: HTMLTextAreaElement } | null = null,
+  segmentDrag: {
+    edgeId: string;
+    index: number;
+    points: Point[];
+    axis: "x" | "y";
+    startX: number;
+    startY: number;
+    moved: boolean;
+  } | null = null;
 function getTypes() {
   return [
     ...new Set(
@@ -9,7 +17,7 @@ function getTypes() {
     ),
   ];
 }
-function beginNameEdit(id, isNew = false) {
+function beginNameEdit(id: string, isNew = false) {
   endNameEdit();
   const node = data.nodes.find((n) => n.id === id);
   if (!node) return;
@@ -23,10 +31,11 @@ function beginNameEdit(id, isNew = false) {
   input.value = node.text;
   input.spellcheck = false;
   input.rows = 2;
+  input.maxLength = LIMITS.textChars;
   for (const event of ["pointerdown", "click", "dblclick"])
     input.addEventListener(event, (e) => e.stopPropagation());
   input.oninput = () => {
-    node.text = input.value;
+    setText(node, "text", input.value, input, LIMITS.textChars);
     const prop = $("#prop-text");
     if (prop) prop.value = node.text;
     render();
@@ -57,7 +66,8 @@ function endNameEdit() {
 }
 function syncNameEditor() {
   if (!nameEditing) return;
-  const n = data.nodes.find((n) => n.id === nameEditing.id);
+  const { id } = nameEditing;
+  const n = data.nodes.find((n) => n.id === id);
   if (!n || selected?.kind !== "nodes" || selected.id !== n.id) {
     endNameEdit();
     return;
@@ -75,12 +85,13 @@ function syncNameEditor() {
   });
   if (document.activeElement !== input) input.value = n.text;
 }
-function createInDirection(origin) {
+function createInDirection(origin: ConnectionStart) {
   if (!canAdd({ nodes: 1, edges: 1 })) return;
   const source = data.nodes.find((n) => n.id === origin.id);
   if (!source) return;
   const lane = data.lanes.find((l) => l.id === source.lane),
     row = Number(source.row) || 0;
+  if (!lane) return;
   if (
     ((origin.side === "top" && row === 0) ||
       (origin.side === "bottom" && row === laneRows(lane) - 1)) &&
@@ -92,7 +103,7 @@ function createInDirection(origin) {
   checkpoint();
   let targetRow = row,
     targetX = source.x;
-  const opposite = {
+  const opposite: Record<Side, Side> = {
     left: "right",
     right: "left",
     top: "bottom",
@@ -169,7 +180,7 @@ function createInDirection(origin) {
       .forEach((n) => (n.row = (Number(n.row) || 0) + 1));
     targetRow = insert;
   }
-  const n = {
+  const n: FlowNode = {
     id: uid(),
     lane: lane.id,
     row: targetRow,
@@ -201,7 +212,7 @@ function createInDirection(origin) {
     viewport.scrollTop = Math.max(0, p.y * zoom - 60);
   beginNameEdit(n.id, true);
 }
-function edgePoints(edge) {
+function edgePoints(edge: FlowEdge) {
   const a = data.nodes.find((n) => n.id === edge.from),
     b = data.nodes.find((n) => n.id === edge.to);
   if (!a || !b) return [];
@@ -215,7 +226,8 @@ function edgePoints(edge) {
 }
 function drawSegmentHandles() {
   if (selected?.kind !== "edges") return;
-  const edge = data.edges.find((e) => e.id === selected.id);
+  const id = selected.id;
+  const edge = data.edges.find((e) => e.id === id);
   if (!edge || (edge.shape || "orthogonal") !== "orthogonal") return;
   const points = edgePoints(edge);
   for (let i = 2; i < points.length - 1; i++) {
@@ -243,7 +255,7 @@ function drawSegmentHandles() {
         ? "直角線の途中を左右へ移動"
         : "直角線の途中を上下へ移動",
     }))
-      rect.setAttribute(key, value);
+      rect.setAttribute(key, String(value));
     rect.style.cursor = vertical ? "ew-resize" : "ns-resize";
     $("#diagram").append(rect);
   }
@@ -251,13 +263,15 @@ function drawSegmentHandles() {
 $(".stage").addEventListener(
   "pointerdown",
   (e) => {
-    const h = e.target.closest("[data-segment]");
+    const h = closestItem(e, "[data-segment]");
     if (!h) return;
     e.preventDefault();
     e.stopImmediatePropagation();
-    const edge = data.edges.find((edge) => edge.id === h.dataset.segmentEdge),
-      points = edgePoints(edge),
+    const edge = data.edges.find((edge) => edge.id === h.dataset.segmentEdge);
+    if (!edge) return;
+    const points = edgePoints(edge),
       index = Number(h.dataset.segment);
+    if (!points[index - 1] || !points[index]) return;
     segmentDrag = {
       edgeId: edge.id,
       index,
@@ -283,6 +297,7 @@ $(".stage").addEventListener(
         (state.axis === "x"
           ? e.clientX - state.startX
           : e.clientY - state.startY) / zoom;
+    if (!edge) return;
     if (!state.moved && Math.abs(delta) < 3) return;
     if (!state.moved) checkpoint();
     state.moved = true;
@@ -291,8 +306,17 @@ $(".stage").addEventListener(
       state.axis === "x" ? laneWidth + 10 : 10,
       points[state.index][state.axis] + delta,
     );
-    points[state.index - 1][state.axis] = value;
-    points[state.index][state.axis] = value;
+    const boundedValue = Math.min(state.axis === "x" ? 101000 : 300000, value);
+    points[state.index - 1][state.axis] = boundedValue;
+    points[state.index][state.axis] = boundedValue;
+    const totalPoints = data.edges.reduce(
+      (sum, e) => sum + (e.id === edge.id ? 0 : (e.route || []).length),
+      points.length,
+    );
+    if (points.length > 200 || totalPoints > LIMITS.routePoints) {
+      toast("経路点の上限を超えるため変更できません");
+      return;
+    }
     edge.route = points;
     render();
   },
@@ -312,8 +336,8 @@ $(".stage").addEventListener(
   true,
 );
 $(".stage").addEventListener("pointercancel", () => (segmentDrag = null), true);
-async function setWorkspaceRows(lane, value) {
-  value = Number(value);
+async function setWorkspaceRows(lane: Lane, rawValue: string | number) {
+  const value = Number(rawValue);
   if (!Number.isInteger(value) || value < 1 || value > 20) return false;
   if (value === laneRows(lane)) return true;
   const affected = data.nodes.filter(
@@ -337,7 +361,7 @@ async function setWorkspaceRows(lane, value) {
   render();
   return true;
 }
-function rowNamesEditor(root, lane) {
+function rowNamesEditor(root: HTMLElement, lane: Lane) {
   const wrapper = document.createElement("details");
   wrapper.className = "row-names-editor";
   wrapper.dataset.laneId = lane.id;
@@ -350,6 +374,7 @@ function rowNamesEditor(root, lane) {
     const input = document.createElement("input");
     input.type = "text";
     input.placeholder = "名前なし";
+    input.maxLength = LIMITS.nameChars;
     input.setAttribute(
       "aria-label",
       lane.name + " " + (row + 1) + "行目の名前",
@@ -361,7 +386,7 @@ function rowNamesEditor(root, lane) {
         { length: laneRows(lane) },
         (_, i) => lane.rowNames?.[i] || "",
       );
-      lane.rowNames[row] = input.value;
+      setText(lane.rowNames, row, input.value, input);
       render();
     };
     label.append(input);
@@ -369,19 +394,20 @@ function rowNamesEditor(root, lane) {
   }
   root.append(wrapper);
 }
-function refreshRowNamesEditor(root, lane) {
-  const previous = Array.from(root.querySelectorAll(".row-names-editor")).find(
-    (el) => el.dataset.laneId === lane.id,
-  );
+function refreshRowNamesEditor(root: HTMLElement, lane: Lane) {
+  const previous = Array.from(
+    root.querySelectorAll<HTMLDetailsElement>(".row-names-editor"),
+  ).find((el) => el.dataset.laneId === lane.id);
   if (!previous) return;
   const holder = document.createElement("div");
   rowNamesEditor(holder, lane);
-  const next = holder.firstElementChild;
+  const next = holder.querySelector("details");
+  if (!next) return;
   next.open = previous.open;
   previous.replaceWith(next);
 }
 
-function workspaceSettings(root) {
+function workspaceSettings(root: HTMLElement) {
   const section = document.createElement("section");
   section.className = "workspace-settings";
   root.append(section);
@@ -409,11 +435,19 @@ function workspaceSettings(root) {
         input.value = type;
         return;
       }
+      const snapshot = structuredClone(data);
       checkpoint();
       data.types = getTypes().map((t) => (t === type ? next : t));
       data.lanes
         .filter((l) => l.customType !== true && l.type === type)
         .forEach((l) => (l.type = next));
+      if (projectTextLength(data) > LIMITS.totalChars) {
+        data = snapshot;
+        input.value = type;
+        toast("文字数の上限を超えています");
+        workspaceSettingsRefresh();
+        return;
+      }
       render();
       workspaceSettingsRefresh();
     };
@@ -428,6 +462,7 @@ function workspaceSettings(root) {
       }
       checkpoint();
       data.types = getTypes().filter((t) => t !== type);
+      updateLeaveWarning();
       workspaceSettingsRefresh();
     };
     row.append(input, remove);
@@ -452,7 +487,15 @@ function workspaceSettings(root) {
     )
       return;
     checkpoint();
+    const previous = data.types;
     data.types = [...getTypes(), text];
+    if (projectTextLength(data) > LIMITS.totalChars) {
+      if (previous === undefined) delete data.types;
+      else data.types = previous;
+      toast("文字数の上限を超えています");
+      return;
+    }
+    updateLeaveWarning();
     workspaceSettingsRefresh();
   }
   addType.onclick = addTypeValue;
@@ -500,7 +543,7 @@ function workspaceSettings(root) {
     };
     top.append(number, remove);
     card.append(top);
-    function field(label, input) {
+    function field(label: string, input: HTMLElement) {
       const wrap = document.createElement("label");
       wrap.textContent = label;
       wrap.append(input);
@@ -508,11 +551,12 @@ function workspaceSettings(root) {
     }
     const name = document.createElement("input");
     name.type = "text";
+    name.maxLength = LIMITS.nameChars;
     name.value = lane.name;
     name.setAttribute("aria-label", "行" + (index + 1) + "の名前");
     name.onfocus = () => checkpoint();
     name.oninput = () => {
-      lane.name = name.value;
+      setText(lane, "name", name.value, name);
       render();
     };
     field("行の名前", name);
@@ -527,7 +571,7 @@ function workspaceSettings(root) {
     type.value = lane.type;
     type.onchange = () => {
       checkpoint();
-      lane.type = type.value;
+      if (!setText(lane, "type", type.value, type)) return;
       lane.customType = !getTypes().includes(type.value);
       render();
     };
@@ -538,17 +582,17 @@ function workspaceSettings(root) {
     rows.type = "number";
     rows.min = "1";
     rows.max = "20";
-    rows.value = laneRows(lane);
+    rows.value = String(laneRows(lane));
     rows.setAttribute("aria-label", "行" + (index + 1) + "の配置行数");
-    async function updateRows(value) {
+    async function updateRows(value: number | string) {
       if (await setWorkspaceRows(lane, value)) workspaceSettingsRefresh();
-      else rows.value = laneRows(lane);
+      else rows.value = String(laneRows(lane));
     }
     rows.onchange = () => updateRows(rows.value);
     for (const [label, delta] of [
       ["増やす", 1],
       ["減らす", -1],
-    ]) {
+    ] as const) {
       const b = document.createElement("button");
       b.type = "button";
       b.textContent = delta === 1 ? "↑" : "↓";
@@ -593,7 +637,7 @@ function workspaceSettings(root) {
     for (const [text, offset] of [
       ["↑ 上へ", -1],
       ["↓ 下へ", 1],
-    ]) {
+    ] as const) {
       const button = document.createElement("button");
       button.type = "button";
       button.textContent = text;
@@ -632,17 +676,21 @@ function workspaceSettings(root) {
   section.append(addLane);
 }
 function workspaceSettingsRefresh() {
-  function refresh(root, build, scroller) {
+  function refresh(
+    root: HTMLElement,
+    build: (root: HTMLElement) => void,
+    scroller: HTMLElement,
+  ) {
     const openIds = new Set(
-        Array.from(root.querySelectorAll(".row-names-editor[open]")).map(
-          (el) => el.dataset.laneId,
-        ),
+        Array.from(
+          root.querySelectorAll<HTMLDetailsElement>(".row-names-editor[open]"),
+        ).map((el) => el.dataset.laneId),
       ),
       scroll = scroller.scrollTop;
     root.innerHTML = "";
     build(root);
     root
-      .querySelectorAll(".row-names-editor")
+      .querySelectorAll<HTMLDetailsElement>(".row-names-editor")
       .forEach((el) => (el.open = openIds.has(el.dataset.laneId)));
     scroller.scrollTop = scroll;
   }
@@ -652,14 +700,15 @@ function workspaceSettingsRefresh() {
   }
   if (selected?.kind === "global") {
     const root = $("#properties");
-    refresh(root, globalProperties, root.parentElement);
+    refresh(root, globalProperties, root.parentElement ?? root);
   }
 }
 const previousProperties = properties;
 properties = function () {
   previousProperties();
   if (selected?.kind === "edges") {
-    const edge = data.edges.find((e) => e.id === selected.id);
+    const id = selected.id;
+    const edge = data.edges.find((e) => e.id === id);
     if (edge?.route) {
       const reset = document.createElement("button");
       reset.type = "button";

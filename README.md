@@ -1,0 +1,122 @@
+# 業務フロー MVP — Cloudflare 配信準備
+
+## 技術構成
+
+- フロントエンド：HTML / CSS / JavaScript（フレームワークなし）
+- 図の描画：SVG。図形・接続線・部署レーンをブラウザ内で描画
+- 状態管理：JavaScriptのメモリ上。DB、サーバー保存、自動保存はなし
+- 保存と復元：JSONエクスポート／インポート
+- 閲覧用出力：SVG / PNG / JPG / HTML
+- 配信：Cloudflare Workers Static Assets（サーバー処理なし）
+- 開発用：Node.js 22以上 / npm / Wrangler 4.158.0（lockfileで固定）
+
+MVPの機能と画面を維持して配信用の構成を追加しています。ReactやTypeScriptへの移行は含みません。
+Wranglerは配信・ローカル開発用です。閲覧者のブラウザでNode.jsは動きません。
+
+## ファイル
+
+```text
+public/            編集対象のHTML・CSS・JavaScript
+  index.html
+  style.css
+  app.js           データ・描画・プロパティ・接続・入出力
+  usability.js     図形上の編集・配置行・全体設定など
+scripts/           構文／参照確認と静的ファイルのビルド
+wrangler.jsonc     Cloudflare配信設定
+package-lock.json  開発依存関係の固定
+ dist/             npm run build が生成する配信用ファイル
+```
+
+`app.js`の後に`usability.js`を読み込む構成です。ファイル単位の分割は既存のままです。
+`dist/`を直接編集せず、`public/`を編集してください。
+既存Sitesの認証情報、Git履歴、ホスティング設定はこの配布物に含みません。
+
+## ローカル起動
+
+このフォルダで次を実行します。
+
+```sh
+npm ci
+npm run dev
+```
+
+ターミナルに表示されたlocalhostのURLをブラウザで開きます。Ctrl+Cで終了します。
+`npm run dev`は起動時にビルドします。編集後はコマンドを再起動してください。
+
+## チェックと配信準備
+
+```sh
+npm run check
+npm run build
+npm run deploy:check
+```
+
+`deploy:check`はWranglerのdry runです。公開はしません。
+構文・静的ファイル参照・Wranglerの配信構成を確認します。全操作の自動テストではありません。
+
+## Cloudflareへデプロイ
+
+Cloudflareアカウントを用意して、次の手順を実施します。
+
+1. `wrangler.jsonc`の`name`を、配信先Workerの識別名に変更します。
+   現在のWorker識別名は`sakkuri-flow`です。サービスの表示名や独自ドメインとは別の設定です。
+   既存Workerと同名にすると更新になるため、初回は未使用の名前を使ってください。
+2. Cloudflareへログインします。
+3. 対象アカウントを確認してから公開します。
+
+```sh
+npx wrangler login
+npx wrangler whoami
+npm run deploy
+```
+
+複数アカウントがある場合は、対象の`account_id`を`wrangler.jsonc`へ設定してから実行します。
+公開が成功すると配信URLが表示されます。独自ドメインはWorkerのDomains & Routesで別途設定できます。
+アカウント情報・APIトークンはソースや公開ファイルに記載しません。
+
+## mainへのpushで自動デプロイ
+
+`.github/workflows/deploy.yml`でGitHub Actionsによる自動デプロイを設定しています。
+
+- mainへのpush：チェックとWranglerのdry runが成功したら本番デプロイ
+- main向けPull Request：チェックとdry runのみ（公開しない）
+- ActionsのRun workflow：mainを指定すると手動デプロイ
+- Worker名：`sakkuri-flow`
+
+最初にリポジトリのSettings → Secrets and variables → Actionsで、次のRepository secretsを登録してください。
+
+| 名前 | 値 |
+| --- | --- |
+| `CLOUDFLARE_API_TOKEN` | 対象CloudflareアカウントでWorkerをデプロイできるAPIトークン |
+| `CLOUDFLARE_ACCOUNT_ID` | 配信先CloudflareアカウントのAccount ID |
+
+CloudflareのAPI Tokens画面で「Edit Cloudflare Workers」テンプレートを利用し、配信先アカウントを対象にしたトークンを作成してください。
+トークンはGitHub Secretsへ直接入力し、コード・Issue・チャットには記載しないでください。
+
+Secrets未設定の場合、チェックは実行できますがデプロイは明示的なエラーで停止します。
+登録後はGitHub Actionsの失敗した実行から「Re-run all jobs」を押すか、「Run workflow」をmainに対して実行してください。
+以降はmainへのpushで自動デプロイされます。
+Workers BuildsのGit連携は同時に有効にせず、このActionsを配信経路として使用してください。
+
+公式資料：https://developers.cloudflare.com/workers/ci-cd/external-cicd/github-actions/
+
+## MVPの保存・通信の範囲
+
+図の内容をアップロードするAPIは実装していません。ブラウザの再読み込みで編集中の状態は失われるため、JSONで保存してください。
+既存と同じくCSSがGoogle Fontsを読み込みます。図データの送信ではありませんが、フォント取得の外部通信は発生します。
+Cloudflareへのアクセスに伴う配信側のログ等と、図データの保存機能は別です。
+
+## 公開後に確認する操作
+
+- 初期状態が3部署・図形なしで開く
+- 図形の追加・名前入力・移動、接続・接続先変更
+- 部署の並べ替え、部署内行数と行名の変更
+- JSONのエクスポートと再インポートで内容が復元される
+- PNG・JPG・SVG・HTMLの出力を開ける
+- 横スクロール時の部署欄固定、拡大縮小
+
+## 公式資料
+
+- https://developers.cloudflare.com/workers/static-assets/
+- https://developers.cloudflare.com/workers/static-assets/get-started/
+- https://developers.cloudflare.com/workers/static-assets/binding/

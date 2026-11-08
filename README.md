@@ -1,4 +1,4 @@
-# 業務フロー MVP — Cloudflare 配信準備
+# さっくりふろー
 
 ## 技術構成
 
@@ -47,12 +47,13 @@ npm run dev
 
 ```sh
 npm run check
+npm test
 npm run build
 npm run deploy:check
 ```
 
 `deploy:check`はWranglerのdry runです。公開はしません。
-構文・静的ファイル参照・Wranglerの配信構成を確認します。全操作の自動テストではありません。
+構文・静的ファイル参照・接続線や上限などの回帰テスト・Wranglerの配信構成を確認します。全操作の自動テストではありません。
 
 ## Cloudflareへデプロイ
 
@@ -122,3 +123,9 @@ Cloudflareへのアクセスに伴う配信側のログ等と、図データの�
 - https://developers.cloudflare.com/workers/static-assets/
 - https://developers.cloudflare.com/workers/static-assets/get-started/
 - https://developers.cloudflare.com/workers/static-assets/binding/
+
+## データ上限
+
+部署・システムは100件、図形は2,000件、接続線は4,000件までです。追加操作では上限を超える追加を拒否し、図形と線を同時に作る場合は両方追加できる場合だけ作成します。
+JSONファイルの入出力は5MBまでです。サイズ超過時はメッセージを表示して保存を中止します。
+手動調整した接続線は接続点の位置が変わった場合に自動経路へ戻し、直角を維持します。

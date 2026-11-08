@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": "24.x"
   },
   "scripts": {
     "check": "node --check public/app.js && node --check public/usability.js && node scripts/check.mjs",

@@ -8,7 +8,7 @@
 - 保存と復元：JSONエクスポート／インポート
 - 閲覧用出力：SVG / PNG / JPG / HTML
 - 配信：Cloudflare Workers Static Assets（サーバー処理なし）
-- 開発用：Node.js 22以上 / npm / Wrangler 4.158.0（lockfileで固定）
+- 開発用：Node.js 24 LTS / npm / Wrangler 4.158.0（lockfileで固定）
 
 MVPの機能と画面を維持して配信用の構成を追加しています。ReactやTypeScriptへの移行は含みません。
 Wranglerは配信・ローカル開発用です。閲覧者のブラウザでNode.jsは動きません。
@@ -89,7 +89,7 @@ GitHub連携時に`topi-log/sakkuri-flow`へのアクセスを許可し、次の
 | ルートディレクトリ | リポジトリ直下（サブディレクトリ指定なし） |
 | ビルドコマンド | `npm run build` |
 | デプロイコマンド | `npx wrangler deploy` |
-| ビルド環境変数 | `NODE_VERSION=22` |
+| ビルド環境変数 | `NODE_VERSION=24` |
 
 依存関係はpackage-lock.jsonを含めて管理しています。ビルドコマンド内で構文・静的ファイル参照をチェックします。
 mainだけを公開する運用では、非本番ブランチのプレビュービルドは無効にしてください。

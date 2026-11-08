@@ -76,29 +76,31 @@ npm run deploy
 
 ## mainへのpushで自動デプロイ
 
-`.github/workflows/deploy.yml`でGitHub Actionsによる自動デプロイを設定しています。
+Cloudflare Workers BuildsのGit連携を使用します。GitHub ActionsのワークフローやGitHub Secretsの登録は不要です。
 
-- mainへのpush：チェックとWranglerのdry runが成功したら本番デプロイ
-- main向けPull Request：チェックとdry runのみ（公開しない）
-- ActionsのRun workflow：mainを指定すると手動デプロイ
-- Worker名：`sakkuri-flow`
+CloudflareダッシュボードのWorkers & PagesからGitリポジトリを接続してWorkerを作成します。既存WorkerならSettings → Buildsでリポジトリを接続します。
+GitHub連携時に`topi-log/sakkuri-flow`へのアクセスを許可し、次の値を設定してください。
 
-最初にリポジトリのSettings → Secrets and variables → Actionsで、次のRepository secretsを登録してください。
-
-| 名前 | 値 |
+| 設定 | 値 |
 | --- | --- |
-| `CLOUDFLARE_API_TOKEN` | 対象CloudflareアカウントでWorkerをデプロイできるAPIトークン |
-| `CLOUDFLARE_ACCOUNT_ID` | 配信先CloudflareアカウントのAccount ID |
+| リポジトリ | `topi-log/sakkuri-flow` |
+| Worker名 | `sakkuri-flow`（wrangler.jsoncのnameと一致） |
+| 本番ブランチ | `main` |
+| ルートディレクトリ | リポジトリ直下（サブディレクトリ指定なし） |
+| ビルドコマンド | `npm run build` |
+| デプロイコマンド | `npx wrangler deploy` |
+| ビルド環境変数 | `NODE_VERSION=22` |
 
-CloudflareのAPI Tokens画面で「Edit Cloudflare Workers」テンプレートを利用し、配信先アカウントを対象にしたトークンを作成してください。
-トークンはGitHub Secretsへ直接入力し、コード・Issue・チャットには記載しないでください。
+依存関係はpackage-lock.jsonを含めて管理しています。ビルドコマンド内で構文・静的ファイル参照をチェックします。
+mainだけを公開する運用では、非本番ブランチのプレビュービルドは無効にしてください。
+接続後、初回のビルド・公開が成功したことをCloudflareのBuilds画面で確認します。以降はmainへのpushで自動ビルド・デプロイされます。
 
-Secrets未設定の場合、チェックは実行できますがデプロイは明示的なエラーで停止します。
-登録後はGitHub Actionsの失敗した実行から「Re-run all jobs」を押すか、「Run workflow」をmainに対して実行してください。
-以降はmainへのpushで自動デプロイされます。
-Workers BuildsのGit連携は同時に有効にせず、このActionsを配信経路として使用してください。
+このリポジトリへの設定ファイル追加だけではGit連携は有効になりません。Cloudflare側で一度、上記の接続設定が必要です。
 
-公式資料：https://developers.cloudflare.com/workers/ci-cd/external-cicd/github-actions/
+公式資料：
+- https://developers.cloudflare.com/workers/ci-cd/builds/git-integration/
+- https://developers.cloudflare.com/workers/ci-cd/builds/configuration/
+- https://developers.cloudflare.com/workers/ci-cd/builds/build-branches/
 
 ## MVPの保存・通信の範囲
 
